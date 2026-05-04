@@ -1,0 +1,73 @@
+name: login
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'send-code or login'
+        required: true
+        default: 'send-code'
+      account_id:
+        description: 'Account id for login mode'
+        required: false
+      account_name:
+        description: 'Account display name for login mode'
+        required: false
+      phone:
+        description: 'Phone number'
+        required: true
+      captcha:
+        description: 'SMS captcha for login mode'
+        required: false
+      device_id:
+        description: 'Reuse this device id between send-code and login'
+        required: false
+
+jobs:
+  login:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.32.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Send captcha
+        if: inputs.mode == 'send-code'
+        env:
+          TAYGEDO_LOGIN_MODE: send-code
+          TAYGEDO_LOGIN_PHONE: ${{ inputs.phone }}
+          TAYGEDO_LOGIN_DEVICE_ID: ${{ inputs.device_id }}
+          TAYGEDO_LOGIN_DEVICE_ID_PATH: device-id.txt
+        run: pnpm tsx src/login-action.ts
+
+      - name: Login and write accounts
+        if: inputs.mode == 'login'
+        env:
+          TAYGEDO_LOGIN_MODE: login
+          TAYGEDO_LOGIN_PHONE: ${{ inputs.phone }}
+          TAYGEDO_LOGIN_CAPTCHA: ${{ inputs.captcha }}
+          TAYGEDO_LOGIN_DEVICE_ID: ${{ inputs.device_id }}
+          TAYGEDO_LOGIN_ACCOUNT_ID: ${{ inputs.account_id }}
+          TAYGEDO_LOGIN_ACCOUNT_NAME: ${{ inputs.account_name }}
+          TAYGEDO_ACCOUNTS: ${{ secrets.TAYGEDO_ACCOUNTS }}
+          TAYGEDO_UPDATED_ACCOUNTS_PATH: updated-accounts.json
+        run: pnpm tsx src/login-action.ts
+
+      - name: Update TAYGEDO_ACCOUNTS secret
+        if: inputs.mode == 'login' && hashFiles('updated-accounts.json') != ''
+        env:
+          GH_TOKEN: ${{ secrets.GH_SECRET_UPDATE_TOKEN }}
+        run: gh secret set TAYGEDO_ACCOUNTS < updated-accounts.json

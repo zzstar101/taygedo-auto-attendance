@@ -79,4 +79,53 @@ describe('TaygedoApi', () => {
       }),
     )
   })
+
+  it('sends captcha and exchanges login credentials through the laohu and usercenter endpoints', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ code: 0, message: 'ok' }), { status: 200 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ code: 0, message: 'ok', result: { token: 'laohu-token', userId: 'user-1' } }), { status: 200 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ code: 0, msg: 'ok', data: { accessToken: 'access-token', refreshToken: 'refresh-token', uid: 'uid-1' } }), { status: 200 }),
+      )
+    const api = new TaygedoApi({ fetch: fetchMock })
+
+    await api.sendCaptcha('13800138000', 'device-1')
+    expect(await api.loginWithCaptcha('13800138000', '123456', 'device-1')).toEqual({
+      token: 'laohu-token',
+      userId: 'user-1',
+    })
+    expect(await api.userCenterLogin('laohu-token', 'user-1', 'device-1')).toEqual({
+      accessToken: 'access-token',
+      refreshToken: 'refresh-token',
+      uid: 'uid-1',
+    })
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      'https://user.laohu.com/m/newApi/sendPhoneCaptchaWithOutLogin',
+      expect.objectContaining({
+        method: 'POST',
+      }),
+    )
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      'https://user.laohu.com/openApi/sms/new/login',
+      expect.objectContaining({
+        method: 'POST',
+      }),
+    )
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      'https://bbs-api.tajiduo.com/usercenter/api/login',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({
+          deviceid: 'device-1',
+          appversion: '1.1.0',
+        }),
+      }),
+    )
+  })
 })
