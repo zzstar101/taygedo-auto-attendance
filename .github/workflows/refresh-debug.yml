@@ -1,0 +1,64 @@
+name: refresh-debug
+
+on:
+  workflow_dispatch:
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Debug refresh request variants
+        env:
+          TAYGEDO_ACCOUNTS: ${{ secrets.TAYGEDO_ACCOUNTS }}
+        run: |
+          node --input-type=module <<'EOF'
+          const accounts = JSON.parse(process.env.TAYGEDO_ACCOUNTS || '[]')
+          const account = accounts[0]
+          if (!account) {
+            throw new Error('No account configured')
+          }
+
+          const endpoint = 'https://bbs-api.tajiduo.com/usercenter/api/refreshToken'
+          const baseHeaders = {
+            authorization: account.refreshToken,
+            deviceid: account.deviceId,
+            appversion: '1.1.0',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'User-Agent': 'okhttp/4.12.0',
+          }
+          const variants = [
+            ['current', { method: 'POST', headers: baseHeaders }],
+            ['with-platform-uid', { method: 'POST', headers: { ...baseHeaders, platform: 'android', uid: account.uid } }],
+            ['capital-authorization', { method: 'POST', headers: { ...baseHeaders, Authorization: account.refreshToken } }],
+            ['bearer-authorization', { method: 'POST', headers: { ...baseHeaders, authorization: `Bearer ${account.refreshToken}` } }],
+            ['body-refreshToken', {
+              method: 'POST',
+              headers: { ...baseHeaders, authorization: '' },
+              body: new URLSearchParams({ refreshToken: account.refreshToken }).toString(),
+            }],
+          ]
+
+          for (const [name, init] of variants) {
+            const response = await fetch(endpoint, init)
+            const text = await response.text()
+            let parsed
+            try {
+              parsed = text ? JSON.parse(text) : undefined
+            }
+            catch {
+              parsed = undefined
+            }
+            const hasTokens = Boolean(parsed?.data?.accessToken && parsed?.data?.refreshToken)
+            console.log(JSON.stringify({
+              name,
+              status: response.status,
+              bodyLength: text.length,
+              jsonCode: parsed?.code,
+              jsonMsg: parsed?.msg ?? parsed?.message,
+              hasTokens,
+            }))
+            if (hasTokens) {
+              break
+            }
+          }
+          EOF
