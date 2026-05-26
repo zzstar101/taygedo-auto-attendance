@@ -13,6 +13,6 @@ describe('credential encryption', () => {
   it('rejects decrypting with a different key', () => {
     const encrypted = encryptPassword('secret-password', generateCredentialKey())
 
-    expect(() => decryptPassword(encrypted, generateCredentialKey())).toThrow('Failed to decrypt stored password')
+    expect(() => decryptPassword(encrypted, generateCredentialKey())).toThrow('存储密码解密失败，请检查 TAYGEDO_CREDENTIAL_KEY')
   })
 })

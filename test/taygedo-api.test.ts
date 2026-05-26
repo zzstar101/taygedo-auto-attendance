@@ -42,7 +42,7 @@ describe('TaygedoApi', () => {
     const api = new TaygedoApi({ fetch: fetchMock })
 
     await expect(api.refreshToken('old-refresh', 'device-1')).rejects.toThrow(
-      'refreshToken returned invalid JSON (HTTP 200, empty response)',
+      'refreshToken 返回了无效 JSON（HTTP 200，响应为空）',
     )
   })
 

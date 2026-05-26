@@ -23,7 +23,7 @@ export class UnstorageAccountStore implements AccountStore {
   async readAccounts(): Promise<string> {
     const value = await this.storage.getItem<string | unknown>(this.key)
     if (!value) {
-      throw new Error(`Missing accounts in unstorage key ${this.key}`)
+      throw new Error(`unstorage 中缺少账号配置，key：${this.key}`)
     }
     return typeof value === 'string' ? value : JSON.stringify(value)
   }

@@ -16,13 +16,13 @@ export class EnvAccountStore implements AccountStore {
 
   async readAccounts(): Promise<string> {
     if (!this.accountsSecret) {
-      throw new Error('Missing required env TAYGEDO_ACCOUNTS')
+      throw new Error('缺少必需环境变量 TAYGEDO_ACCOUNTS')
     }
     return this.accountsSecret
   }
 
   async writeAccounts(): Promise<void> {
-    throw new Error('EnvAccountStore is read-only')
+    throw new Error('环境变量账号存储是只读的')
   }
 }
 
@@ -54,7 +54,7 @@ export class CloudflareKvAccountStore implements AccountStore {
       return stored
     }
     if (!this.initialAccounts) {
-      throw new Error(`Missing accounts in Cloudflare KV key ${this.key}`)
+      throw new Error(`Cloudflare KV 中缺少账号配置，key：${this.key}`)
     }
     await this.kv.put(this.key, this.initialAccounts)
     return this.initialAccounts
@@ -80,7 +80,7 @@ export class UpstashAccountStore implements AccountStore {
   async readAccounts(): Promise<string> {
     const data = await this.request<{ result?: string | null }>(`get/${encodeURIComponent(this.key)}`)
     if (!data.result) {
-      throw new Error(`Missing accounts in Upstash key ${this.key}`)
+      throw new Error(`Upstash 中缺少账号配置，key：${this.key}`)
     }
     return data.result
   }
@@ -96,7 +96,7 @@ export class UpstashAccountStore implements AccountStore {
       },
     })
     if (!response.ok) {
-      throw new Error(`Upstash account request failed: HTTP ${response.status}`)
+      throw new Error(`Upstash 账号存储请求失败：HTTP ${response.status}`)
     }
     return await response.json() as T
   }

@@ -13,4 +13,11 @@ describe('scheduled attendance time', () => {
 
     expect(wrangler).toContain('"crons": ["0 18 * * *"]')
   })
+
+  it('passes non-secret coin task variables into the attendance action', () => {
+    const workflow = readFileSync('.github/workflows/attendance.yml', 'utf8')
+
+    expect(workflow).toContain('TAYGEDO_COIN_TASKS: ${{ vars.TAYGEDO_COIN_TASKS }}')
+    expect(workflow).toContain('TAYGEDO_SHARE_PLATFORM: ${{ vars.TAYGEDO_SHARE_PLATFORM }}')
+  })
 })

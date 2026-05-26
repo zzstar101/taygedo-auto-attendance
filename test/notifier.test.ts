@@ -63,7 +63,7 @@ describe('sendNotification', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2)
     expect(errors).toEqual([{
       url: 'https://example.com/a',
-      error: 'HTTP 500',
+      error: 'HTTP 状态码 500',
     }])
   })
 })

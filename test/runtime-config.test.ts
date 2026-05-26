@@ -106,6 +106,6 @@ describe('loadRuntimeConfig', () => {
   })
 
   it('rejects invalid retry values', () => {
-    expect(() => loadRuntimeConfig({ TAYGEDO_MAX_RETRIES: 'nope' })).toThrow('TAYGEDO_MAX_RETRIES must be a positive integer')
+    expect(() => loadRuntimeConfig({ TAYGEDO_MAX_RETRIES: 'nope' })).toThrow('TAYGEDO_MAX_RETRIES 必须是正整数')
   })
 })

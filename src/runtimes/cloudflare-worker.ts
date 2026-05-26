@@ -31,12 +31,12 @@ const worker = {
       return Response.json({ ok: true })
     }
     if (url.pathname !== '/run' && url.pathname !== '/login') {
-      return Response.json({ error: 'Not found' }, { status: 404 })
+      return Response.json({ error: '未找到' }, { status: 404 })
     }
 
     const config = loadRuntimeConfig(envToStrings(env))
     if (config.adminToken && request.headers.get('Authorization') !== `Bearer ${config.adminToken}`) {
-      return Response.json({ error: 'Unauthorized' }, { status: 401 })
+      return Response.json({ error: '未授权' }, { status: 401 })
     }
 
     try {
@@ -57,7 +57,7 @@ const worker = {
       return Response.json({ ok: true, summary: result.summary, forceRun: result.forceRun })
     }
 
-    return Response.json({ error: 'Not found' }, { status: 404 })
+    return Response.json({ error: '未找到' }, { status: 404 })
   },
 }
 
@@ -270,7 +270,7 @@ function renderManagementPage(): string {
           body: JSON.stringify(payloadFromForm()),
         })
         const data = await response.json().catch(() => ({}))
-        if (!response.ok) throw new Error(data.error || 'HTTP ' + response.status)
+        if (!response.ok) throw new Error(data.error || 'HTTP 状态码 ' + response.status)
         result.className = 'result ok'
         result.textContent = modeInput.value === 'send-code'
           ? '验证码已发送，请切换到短信验证码登录。'
@@ -323,7 +323,7 @@ async function runCloudflareLogin(request: Request, env: CloudflareEnv) {
   const body = await readLoginBody(request)
   const mode = body.mode ?? 'password'
   if (mode === 'password' && body.password && !config.credentialKey) {
-    throw new HttpError(400, 'Missing TAYGEDO_CREDENTIAL_KEY. Please add it as a Cloudflare secret first.')
+    throw new HttpError(400, '缺少 TAYGEDO_CREDENTIAL_KEY，请先在 Cloudflare 中添加 Secret。')
   }
   const currentAccounts = await tryReadCloudflareAccounts(env, config.accountsKey, config.accountsSecret)
   const service = new LoginService({ api: env.TAYGEDO_TEST_LOGIN_API ?? new TaygedoApi() })
@@ -366,11 +366,11 @@ interface LoginRequestBody {
 
 async function readLoginBody(request: Request): Promise<LoginRequestBody> {
   if (request.method !== 'POST') {
-    throw new Error('Cloudflare login requires POST')
+    throw new Error('Cloudflare 登录接口必须使用 POST')
   }
   const body = await request.json() as Partial<LoginRequestBody>
   if (!body.phone) {
-    throw new Error('Missing login phone')
+    throw new Error('缺少登录手机号')
   }
   return body as LoginRequestBody
 }

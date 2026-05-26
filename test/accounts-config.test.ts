@@ -70,7 +70,7 @@ describe('parseAccountsSecret', () => {
           },
         ]),
       ),
-    ).toThrow('Account main is missing required field refreshToken')
+    ).toThrow('账号 main 缺少必填字段 refreshToken')
   })
 
   it('rejects duplicate account ids', () => {
@@ -93,7 +93,7 @@ describe('parseAccountsSecret', () => {
           },
         ]),
       ),
-    ).toThrow('Duplicate account id: main')
+    ).toThrow('账号 id 重复：main')
   })
 
   it('rejects empty optional session fields', () => {
@@ -110,7 +110,7 @@ describe('parseAccountsSecret', () => {
           },
         ]),
       ),
-    ).toThrow('Optional field accessToken must be a non-empty string when provided')
+    ).toThrow('可选字段 accessToken 如提供则必须是非空字符串')
   })
 
   it('drops legacy plaintext password fields from parsed accounts', () => {

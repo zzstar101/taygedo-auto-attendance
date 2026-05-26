@@ -13,11 +13,12 @@ interface ActionOptions {
 export async function runAction(options: ActionOptions = {}): Promise<void> {
   const env = options.env ?? process.env
   const config = loadRuntimeConfig(env)
+  console.log(`运行配置：金币任务=${config.coinTasks ? '开启' : '关闭'}，分享平台=${config.sharePlatform}，强制重跑=${config.forceRun ? '是' : '否'}`)
   const service = new AttendanceService({
     accountStore: {
       readAccounts: async () => {
         if (!config.accountsSecret) {
-          throw new Error('Missing required env TAYGEDO_ACCOUNTS')
+          throw new Error('缺少必需环境变量 TAYGEDO_ACCOUNTS')
         }
         return config.accountsSecret
       },
@@ -35,7 +36,7 @@ export async function runAction(options: ActionOptions = {}): Promise<void> {
   })
   await service.run()
 
-  console.log(`Updated accounts written to ${config.updatedAccountsPath}`)
+  console.log(`已写入更新后的账号文件：${config.updatedAccountsPath}`)
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

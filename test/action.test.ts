@@ -104,4 +104,37 @@ describe('runAction', () => {
       await rm(dir, { recursive: true, force: true })
     }
   })
+
+  it('prints a clear non-secret runtime configuration summary', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'taygedo-action-config-summary-'))
+    const outputPath = join(dir, 'updated-accounts.json')
+    const api = createApi()
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    try {
+      await runAction({
+        env: {
+          TAYGEDO_ACCOUNTS: JSON.stringify([
+            {
+              id: 'main',
+              name: '主账号',
+              uid: '1',
+              deviceId: 'device-1',
+              refreshToken: 'old-main',
+            },
+          ]),
+          TAYGEDO_UPDATED_ACCOUNTS_PATH: outputPath,
+          TAYGEDO_COIN_TASKS: 'false',
+          TAYGEDO_SHARE_PLATFORM: 'wb',
+        },
+        api,
+      })
+
+      expect(log).toHaveBeenCalledWith(expect.stringContaining('运行配置：金币任务=关闭，分享平台=wb'))
+    }
+    finally {
+      log.mockRestore()
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
 })

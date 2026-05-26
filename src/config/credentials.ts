@@ -49,7 +49,7 @@ export function encryptPassword(password: string, credentialKey: string): Encryp
 export function decryptPassword(encryptedPassword: EncryptedPassword, credentialKey: string): string {
   try {
     if (encryptedPassword.v !== 1 || encryptedPassword.alg !== 'AES-256-GCM') {
-      throw new Error('Unsupported encrypted password format')
+      throw new Error('不支持的加密密码格式')
     }
     const decipher = createDecipheriv(
       'aes-256-gcm',
@@ -63,7 +63,7 @@ export function decryptPassword(encryptedPassword: EncryptedPassword, credential
     ]).toString('utf8')
   }
   catch {
-    throw new Error('Failed to decrypt stored password')
+    throw new Error('存储密码解密失败，请检查 TAYGEDO_CREDENTIAL_KEY')
   }
 }
 

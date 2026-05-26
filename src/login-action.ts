@@ -36,7 +36,7 @@ export async function runLoginAction(deps: LoginActionDependencies = {}): Promis
   }
 
   if (mode !== 'login' && mode !== 'password') {
-    throw new Error('TAYGEDO_LOGIN_MODE must be send-code, login, or password')
+    throw new Error('TAYGEDO_LOGIN_MODE 必须是 send-code、login 或 password')
   }
 
   const device = resolveDeviceIdentity(env, deps, { requireExistingDeviceId: mode !== 'password' })
@@ -47,7 +47,7 @@ export async function runLoginAction(deps: LoginActionDependencies = {}): Promis
   const password = optionalEnv(env, 'TAYGEDO_LOGIN_PASSWORD')
   if (mode === 'password') {
     if (!api.loginWithPassword) {
-      throw new Error('Password login is not supported by the configured API client')
+      throw new Error('当前 API 客户端不支持密码登录')
     }
     loginResult = await api.loginWithPassword(phone, requireEnv(env, 'TAYGEDO_LOGIN_PASSWORD'), device.deviceId)
   }
@@ -134,7 +134,7 @@ async function writeTextFile(path: string, content: string): Promise<void> {
 function requireEnv(env: Record<string, string | undefined>, key: string): string {
   const value = env[key]
   if (!value || value.trim() === '') {
-    throw new Error(`Missing required env ${key}`)
+    throw new Error(`缺少必需环境变量 ${key}`)
   }
   return value
 }

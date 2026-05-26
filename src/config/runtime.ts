@@ -54,11 +54,11 @@ function parseAccountPasswords(env: Record<string, string | undefined>): Record<
   if (rawMap) {
     const parsed = JSON.parse(rawMap) as unknown
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-      throw new Error('TAYGEDO_PASSWORDS must be a JSON object')
+      throw new Error('TAYGEDO_PASSWORDS 必须是 JSON 对象')
     }
     for (const [key, value] of Object.entries(parsed)) {
       if (typeof value !== 'string' || value.trim() === '') {
-        throw new Error('TAYGEDO_PASSWORDS values must be non-empty strings')
+        throw new Error('TAYGEDO_PASSWORDS 的值必须是非空字符串')
       }
       passwords[key] = value
     }
@@ -91,7 +91,7 @@ export function serverChanUrls(sendkey: string | undefined): string[] {
 function parsePositiveInteger(value: string, key: string): number {
   const parsed = Number(value)
   if (!Number.isInteger(parsed) || parsed <= 0) {
-    throw new Error(`${key} must be a positive integer`)
+    throw new Error(`${key} 必须是正整数`)
   }
   return parsed
 }
@@ -107,14 +107,14 @@ function parseAccountStore(value: string): AccountStoreKind {
   if (value === 'env' || value === 'file' || value === 'cloudflare-kv' || value === 'upstash' || value === 'unstorage') {
     return value
   }
-  throw new Error(`Unsupported TAYGEDO_ACCOUNT_STORE: ${value}`)
+  throw new Error(`不支持的 TAYGEDO_ACCOUNT_STORE：${value}`)
 }
 
 function parseStateStore(value: string): StateStoreKind {
   if (value === 'memory' || value === 'file' || value === 'cloudflare-kv' || value === 'upstash' || value === 'unstorage') {
     return value
   }
-  throw new Error(`Unsupported TAYGEDO_STATE_STORE: ${value}`)
+  throw new Error(`不支持的 TAYGEDO_STATE_STORE：${value}`)
 }
 
 function parseBoolean(value: string | undefined): boolean {

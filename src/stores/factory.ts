@@ -34,7 +34,7 @@ export function createAccountStore(options: StoreFactoryOptions): AccountStore {
   }
   if (config.accountStore === 'cloudflare-kv') {
     if (!options.kv) {
-      throw new Error('Cloudflare KV account store requires a KV binding')
+      throw new Error('Cloudflare KV 账号存储需要绑定 KV')
     }
     return new CloudflareKvAccountStore(options.kv, config.accountsKey, config.accountsSecret)
   }
@@ -42,7 +42,7 @@ export function createAccountStore(options: StoreFactoryOptions): AccountStore {
     return new LazyAccountStore(async () => new UnstorageAccountStore(await createUnstorageFromEnv(), config.accountsKey))
   }
   if (!config.upstashUrl || !config.upstashToken) {
-    throw new Error('Upstash account store requires TAYGEDO_UPSTASH_REDIS_REST_URL and TAYGEDO_UPSTASH_REDIS_REST_TOKEN')
+    throw new Error('Upstash 账号存储需要配置 TAYGEDO_UPSTASH_REDIS_REST_URL 和 TAYGEDO_UPSTASH_REDIS_REST_TOKEN')
   }
   return new UpstashAccountStore(config.upstashUrl, config.upstashToken, config.accountsKey, options.fetch)
 }
@@ -57,7 +57,7 @@ export function createStateStore(options: StoreFactoryOptions): StateStore {
   }
   if (config.stateStore === 'cloudflare-kv') {
     if (!options.kv) {
-      throw new Error('Cloudflare KV state store requires a KV binding')
+      throw new Error('Cloudflare KV 状态存储需要绑定 KV')
     }
     return new CloudflareKvStateStore(options.kv, config.statePrefix)
   }
@@ -65,7 +65,7 @@ export function createStateStore(options: StoreFactoryOptions): StateStore {
     return new LazyStateStore(async () => new UnstorageStateStore(await createUnstorageFromEnv(), config.statePrefix))
   }
   if (!config.upstashUrl || !config.upstashToken) {
-    throw new Error('Upstash state store requires TAYGEDO_UPSTASH_REDIS_REST_URL and TAYGEDO_UPSTASH_REDIS_REST_TOKEN')
+    throw new Error('Upstash 状态存储需要配置 TAYGEDO_UPSTASH_REDIS_REST_URL 和 TAYGEDO_UPSTASH_REDIS_REST_TOKEN')
   }
   return new UpstashStateStore(config.upstashUrl, config.upstashToken, config.statePrefix, options.fetch)
 }

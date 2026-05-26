@@ -105,7 +105,7 @@ export class UpstashStateStore implements StateStore {
       },
     })
     if (!response.ok) {
-      throw new Error(`Upstash request failed: HTTP ${response.status}`)
+      throw new Error(`Upstash 状态存储请求失败：HTTP ${response.status}`)
     }
     return await response.json() as T
   }

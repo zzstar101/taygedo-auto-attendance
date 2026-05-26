@@ -10,7 +10,7 @@ describe('AccountStore implementations', () => {
   it('reads accounts from env and refuses writes', async () => {
     const store = new EnvAccountStore('accounts-json')
     await expect(store.readAccounts()).resolves.toBe('accounts-json')
-    await expect(store.writeAccounts()).rejects.toThrow('EnvAccountStore is read-only')
+    await expect(store.writeAccounts()).rejects.toThrow('环境变量账号存储是只读的')
   })
 
   it('reads and writes accounts from a file', async () => {

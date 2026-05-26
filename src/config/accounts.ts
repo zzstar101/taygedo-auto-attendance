@@ -21,18 +21,18 @@ export interface TaygedoAccount {
 export function parseAccountsSecret(secret: string): TaygedoAccount[] {
   const parsed = JSON.parse(secret) as unknown
   if (!Array.isArray(parsed)) {
-    throw new Error('TAYGEDO_ACCOUNTS must be a JSON array')
+    throw new Error('TAYGEDO_ACCOUNTS 必须是 JSON 数组')
   }
 
   const ids = new Set<string>()
   return parsed.map((account, index) => {
     if (!isRecord(account)) {
-      throw new Error(`Account at index ${index} must be an object`)
+      throw new Error(`第 ${index} 个账号必须是对象`)
     }
 
     const id = requireString(account, 'id', index)
     if (ids.has(id)) {
-      throw new Error(`Duplicate account id: ${id}`)
+      throw new Error(`账号 id 重复：${id}`)
     }
     ids.add(id)
 
@@ -78,7 +78,7 @@ function assignOptionalEncryptedPassword(
     return
   }
   if (!isRecord(value)) {
-    throw new Error(`Optional field ${field} for account ${id} must be an object when provided`)
+    throw new Error(`账号 ${id} 的可选字段 ${field} 必须是对象`)
   }
   const encryptedPassword = {
     v: value.v,
@@ -97,7 +97,7 @@ function assignOptionalEncryptedPassword(
     || !encryptedPassword.tag
     || !encryptedPassword.data
   ) {
-    throw new Error(`Optional field ${field} for account ${id} is invalid`)
+    throw new Error(`账号 ${id} 的可选字段 ${field} 格式无效`)
   }
   parsedAccount.encryptedPassword = {
     v: 1,
@@ -120,7 +120,7 @@ function requireString(
 ): string {
   const value = account[field]
   if (typeof value !== 'string' || value.trim() === '') {
-    throw new Error(`Account ${id} is missing required field ${field}`)
+    throw new Error(`账号 ${id} 缺少必填字段 ${field}`)
   }
   return value
 }
@@ -131,7 +131,7 @@ function optionalString(account: Record<string, unknown>, field: keyof TaygedoAc
     return undefined
   }
   if (typeof value !== 'string' || value.trim() === '') {
-    throw new Error(`Optional field ${field} must be a non-empty string when provided`)
+    throw new Error(`可选字段 ${field} 如提供则必须是非空字符串`)
   }
   return value
 }

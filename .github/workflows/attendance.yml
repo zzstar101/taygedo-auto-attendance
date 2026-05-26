@@ -44,6 +44,8 @@ jobs:
           TAYGEDO_CREDENTIAL_KEY: ${{ secrets.TAYGEDO_CREDENTIAL_KEY }}
           TAYGEDO_UPDATED_ACCOUNTS_PATH: updated-accounts.json
           TAYGEDO_FORCE_RUN: ${{ inputs.force_run || 'false' }}
+          TAYGEDO_COIN_TASKS: ${{ vars.TAYGEDO_COIN_TASKS }}
+          TAYGEDO_SHARE_PLATFORM: ${{ vars.TAYGEDO_SHARE_PLATFORM }}
         run: pnpm action
 
       - name: 更新账号 Secret

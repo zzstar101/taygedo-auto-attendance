@@ -33,7 +33,7 @@ export async function sendNotification(payload: NotificationPayload): Promise<No
     }
     catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      console.error(`Notification failed for ${url}: ${message}`)
+      console.error(`通知发送失败：${url}，原因：${message}`)
       errors.push({ url, error: message })
     }
   }
@@ -43,7 +43,7 @@ export async function sendNotification(payload: NotificationPayload): Promise<No
 async function assertNotificationResponse(responsePromise: Promise<Response>): Promise<void> {
   const response = await responsePromise
   if (!response.ok) {
-    throw new Error(`HTTP ${response.status}`)
+    throw new Error(`HTTP 状态码 ${response.status}`)
   }
 }
 

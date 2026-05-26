@@ -68,7 +68,7 @@ export async function runLocalCli(argv = process.argv.slice(2), deps: LocalCliDe
     return
   }
 
-  throw new Error('Usage: local-cli attendance|login|device --accounts-file <path>')
+  throw new Error('用法：local-cli attendance|login|device --accounts-file <path>')
 }
 
 function createDefaultService(): LocalCliService {
@@ -146,7 +146,7 @@ function parseArgs(args: string[]): Record<string, string | undefined> {
 function requireOption(options: Record<string, string | undefined>, key: string): string {
   const value = options[key]
   if (!value) {
-    throw new Error(`Missing required option --${key}`)
+    throw new Error(`缺少必需参数 --${key}`)
   }
   return value
 }
@@ -157,7 +157,7 @@ function parseLoopSeconds(value: string | undefined): number | undefined {
   }
   const parsed = Number(value)
   if (!Number.isInteger(parsed) || parsed <= 0) {
-    throw new Error('TAYGEDO_LOOP_SECONDS must be a positive integer')
+    throw new Error('TAYGEDO_LOOP_SECONDS 必须是正整数')
   }
   return parsed
 }

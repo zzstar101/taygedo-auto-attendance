@@ -362,7 +362,7 @@ describe('runLoginAction', () => {
       },
       api,
       generateDeviceId: () => 'unexpected-device',
-    })).rejects.toThrow('Missing required env TAYGEDO_LOGIN_DEVICE_ID')
+    })).rejects.toThrow('缺少必需环境变量 TAYGEDO_LOGIN_DEVICE_ID')
 
     expect(api.checkCaptcha).not.toHaveBeenCalled()
   })
