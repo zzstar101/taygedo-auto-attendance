@@ -34,6 +34,8 @@ TAYGEDO_ADMIN_TOKEN=手动触发和登录接口使用的随机字符串
 TAYGEDO_CREDENTIAL_KEY=一段随机密钥
 ```
 
+> 安全提醒：`TAYGEDO_CREDENTIAL_KEY` 必须使用高强度随机密钥，不要使用手机号、生日、短密码或常用短语。它只需要保存在 Cloudflare Secret 中供 Worker 解密账号密码使用，不需要自己记住；丢失后重新 password 登录生成新的加密密码即可。
+
 可选：
 
 ```text
@@ -338,8 +340,10 @@ account_name=主账号
     "tokenUpdatedAt": "2026-05-07T08:00:00+08:00",
     "phone": "13800138000",
     "encryptedPassword": {
-      "v": 1,
+      "v": 2,
       "alg": "AES-256-GCM",
+      "kdf": "scrypt",
+      "salt": "...",
       "iv": "...",
       "tag": "...",
       "data": "..."

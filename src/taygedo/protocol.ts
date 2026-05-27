@@ -125,6 +125,25 @@ function formEncode(data: Record<string, string | number | undefined>): string {
 }
 
 function makeNonce(): string {
-  const bytes = randomBytes(8)
-  return Array.from(bytes, byte => NONCE_ALPHABET[byte % NONCE_ALPHABET.length]).join('')
+  let nonce = ''
+  while (nonce.length < 8) {
+    for (const byte of randomBytes(8)) {
+      const index = nonceIndexFromByte(byte)
+      if (index !== undefined) {
+        nonce += NONCE_ALPHABET[index]
+        if (nonce.length === 8) {
+          break
+        }
+      }
+    }
+  }
+  return nonce
+}
+
+export function nonceIndexFromByte(byte: number): number | undefined {
+  const fairRange = Math.floor(256 / NONCE_ALPHABET.length) * NONCE_ALPHABET.length
+  if (byte >= fairRange) {
+    return undefined
+  }
+  return byte % NONCE_ALPHABET.length
 }

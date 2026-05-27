@@ -19,8 +19,10 @@ describe('parseAccountsSecret', () => {
           tokenUpdatedAt: '2026-05-07T08:00:00+08:00',
           phone: '13800138000',
           encryptedPassword: {
-            v: 1,
+            v: 2,
             alg: 'AES-256-GCM',
+            kdf: 'scrypt',
+            salt: 'salt',
             iv: 'iv',
             tag: 'tag',
             data: 'data',
@@ -46,8 +48,10 @@ describe('parseAccountsSecret', () => {
         tokenUpdatedAt: '2026-05-07T08:00:00+08:00',
         phone: '13800138000',
         encryptedPassword: {
-          v: 1,
+          v: 2,
           alg: 'AES-256-GCM',
+          kdf: 'scrypt',
+          salt: 'salt',
           iv: 'iv',
           tag: 'tag',
           data: 'data',

@@ -83,12 +83,14 @@ function assignOptionalEncryptedPassword(
   const encryptedPassword = {
     v: value.v,
     alg: value.alg,
+    kdf: value.kdf,
+    salt: value.salt,
     iv: value.iv,
     tag: value.tag,
     data: value.data,
   }
   if (
-    encryptedPassword.v !== 1
+    (encryptedPassword.v !== 1 && encryptedPassword.v !== 2)
     || encryptedPassword.alg !== 'AES-256-GCM'
     || typeof encryptedPassword.iv !== 'string'
     || typeof encryptedPassword.tag !== 'string'
@@ -96,16 +98,27 @@ function assignOptionalEncryptedPassword(
     || !encryptedPassword.iv
     || !encryptedPassword.tag
     || !encryptedPassword.data
+    || (encryptedPassword.v === 2 && (encryptedPassword.kdf !== 'scrypt' || typeof encryptedPassword.salt !== 'string' || !encryptedPassword.salt))
   ) {
     throw new Error(`账号 ${id} 的可选字段 ${field} 格式无效`)
   }
-  parsedAccount.encryptedPassword = {
-    v: 1,
-    alg: 'AES-256-GCM',
-    iv: encryptedPassword.iv,
-    tag: encryptedPassword.tag,
-    data: encryptedPassword.data,
-  }
+  parsedAccount.encryptedPassword = encryptedPassword.v === 1
+    ? {
+        v: 1,
+        alg: 'AES-256-GCM',
+        iv: encryptedPassword.iv,
+        tag: encryptedPassword.tag,
+        data: encryptedPassword.data,
+      }
+    : {
+        v: 2,
+        alg: 'AES-256-GCM',
+        kdf: 'scrypt',
+        salt: encryptedPassword.salt as string,
+        iv: encryptedPassword.iv,
+        tag: encryptedPassword.tag,
+        data: encryptedPassword.data,
+      }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

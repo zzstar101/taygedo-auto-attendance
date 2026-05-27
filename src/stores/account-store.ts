@@ -35,7 +35,7 @@ export class FileAccountStore implements AccountStore {
 
   async writeAccounts(payload: string): Promise<void> {
     await mkdir(dirname(this.path), { recursive: true })
-    await writeFile(this.path, `${payload}\n`, 'utf8')
+    await writeFile(this.path, `${payload}\n`, { encoding: 'utf8', mode: 0o600 })
   }
 }
 
@@ -86,12 +86,17 @@ export class UpstashAccountStore implements AccountStore {
   }
 
   async writeAccounts(payload: string): Promise<void> {
-    await this.request(`set/${encodeURIComponent(this.key)}/${encodeURIComponent(payload)}`)
+    await this.request(`set/${encodeURIComponent(this.key)}`, {
+      method: 'POST',
+      body: payload,
+    })
   }
 
-  private async request<T>(path: string): Promise<T> {
+  private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
     const response = await this.fetchImpl(`${this.baseUrl}/${path}`, {
+      ...init,
       headers: {
+        ...init.headers,
         Authorization: `Bearer ${this.token}`,
       },
     })

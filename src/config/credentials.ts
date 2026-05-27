@@ -1,10 +1,22 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto'
+import { createCipheriv, createDecipheriv, createHash, randomBytes, scryptSync } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
-export interface EncryptedPassword {
+export type EncryptedPassword = LegacyEncryptedPassword | ScryptEncryptedPassword
+
+export interface LegacyEncryptedPassword {
   v: 1
   alg: 'AES-256-GCM'
+  iv: string
+  tag: string
+  data: string
+}
+
+export interface ScryptEncryptedPassword {
+  v: 2
+  alg: 'AES-256-GCM'
+  kdf: 'scrypt'
+  salt: string
   iv: string
   tag: string
   data: string
@@ -33,13 +45,16 @@ export async function loadOrCreateCredentialKey(path: string): Promise<string> {
 }
 
 export function encryptPassword(password: string, credentialKey: string): EncryptedPassword {
-  const key = deriveKey(credentialKey)
+  const salt = randomBytes(16)
+  const key = deriveScryptKey(credentialKey, salt)
   const iv = randomBytes(12)
   const cipher = createCipheriv('aes-256-gcm', key, iv)
   const encrypted = Buffer.concat([cipher.update(password, 'utf8'), cipher.final()])
   return {
-    v: 1,
+    v: 2,
     alg: 'AES-256-GCM',
+    kdf: 'scrypt',
+    salt: salt.toString('base64url'),
     iv: iv.toString('base64url'),
     tag: cipher.getAuthTag().toString('base64url'),
     data: encrypted.toString('base64url'),
@@ -48,12 +63,15 @@ export function encryptPassword(password: string, credentialKey: string): Encryp
 
 export function decryptPassword(encryptedPassword: EncryptedPassword, credentialKey: string): string {
   try {
-    if (encryptedPassword.v !== 1 || encryptedPassword.alg !== 'AES-256-GCM') {
+    if (encryptedPassword.alg !== 'AES-256-GCM') {
       throw new Error('不支持的加密密码格式')
     }
+    const key = encryptedPassword.v === 1
+      ? deriveLegacyKey(credentialKey)
+      : deriveScryptKey(credentialKey, Buffer.from(encryptedPassword.salt, 'base64url'))
     const decipher = createDecipheriv(
       'aes-256-gcm',
-      deriveKey(credentialKey),
+      key,
       Buffer.from(encryptedPassword.iv, 'base64url'),
     )
     decipher.setAuthTag(Buffer.from(encryptedPassword.tag, 'base64url'))
@@ -67,6 +85,10 @@ export function decryptPassword(encryptedPassword: EncryptedPassword, credential
   }
 }
 
-function deriveKey(credentialKey: string): Buffer {
+function deriveLegacyKey(credentialKey: string): Buffer {
   return createHash('sha256').update(credentialKey, 'utf8').digest()
+}
+
+function deriveScryptKey(credentialKey: string, salt: Buffer): Buffer {
+  return scryptSync(credentialKey, salt, 32, { N: 16384, r: 8, p: 1 })
 }

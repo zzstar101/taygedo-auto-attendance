@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
@@ -22,6 +22,21 @@ describe('AccountStore implementations', () => {
       await store.writeAccounts('{"ok":true}')
       await expect(store.readAccounts()).resolves.toBe('{"ok":true}')
       expect(await readFile(path, 'utf8')).toBe('{"ok":true}\n')
+    }
+    finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('writes account files with owner-only permissions', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'taygedo-store-mode-'))
+    const path = join(dir, 'nested', 'accounts.json')
+    const store = new FileAccountStore(path)
+
+    try {
+      await store.writeAccounts('{"ok":true}')
+
+      expect((await stat(path)).mode & 0o777).toBe(0o600)
     }
     finally {
       await rm(dir, { recursive: true, force: true })
@@ -59,8 +74,11 @@ describe('AccountStore implementations', () => {
     )
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
-      'https://redis.example.com/set/accounts/%5B%7B%22id%22%3A%22alt%22%7D%5D',
-      expect.any(Object),
+      'https://redis.example.com/set/accounts',
+      expect.objectContaining({
+        method: 'POST',
+        body: '[{"id":"alt"}]',
+      }),
     )
   })
 
@@ -97,6 +115,19 @@ describe('StateStore implementations', () => {
     }
   })
 
+  it('rejects file state keys that escape the base directory', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'taygedo-state-traversal-'))
+    const store = new FileStateStore(dir, 'prod')
+
+    try {
+      await expect(store.set('../outside', { ok: false })).rejects.toThrow('状态 key 包含非法路径片段')
+      await expect(store.get('../outside')).rejects.toThrow('状态 key 包含非法路径片段')
+    }
+    finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
   it('stores values in Cloudflare KV with a prefix', async () => {
     const kv = new Map<string, string>()
     const put = vi.fn(async (key: string, value: string) => { kv.set(key, value) })
@@ -122,9 +153,11 @@ describe('StateStore implementations', () => {
 
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
-      'https://redis.example.com/set/prod%3Alast/%7B%22ok%22%3Atrue%7D?EX=60',
+      'https://redis.example.com/set/prod%3Alast?EX=60',
       expect.objectContaining({
+        method: 'POST',
         headers: expect.objectContaining({ Authorization: 'Bearer redis-token' }),
+        body: JSON.stringify({ ok: true }),
       }),
     )
     expect(fetchMock).toHaveBeenNthCalledWith(

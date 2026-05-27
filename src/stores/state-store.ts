@@ -1,5 +1,5 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import type { KvNamespace } from './account-store.js'
 
 export interface StateStore {
@@ -52,7 +52,15 @@ export class FileStateStore implements StateStore {
 
   private pathFor(key: string): string {
     const safeParts = key.split('/').filter(Boolean)
-    return join(this.baseDir, this.prefix, ...safeParts) + '.json'
+    if (safeParts.some(part => part === '.' || part === '..')) {
+      throw new Error('状态 key 包含非法路径片段')
+    }
+    const basePath = resolve(this.baseDir, this.prefix)
+    const targetPath = resolve(basePath, ...safeParts) + '.json'
+    if (!targetPath.startsWith(`${basePath}/`) && targetPath !== `${basePath}.json`) {
+      throw new Error('状态 key 包含非法路径片段')
+    }
+    return targetPath
   }
 }
 
@@ -95,12 +103,17 @@ export class UpstashStateStore implements StateStore {
 
   async set<T>(key: string, value: T, options?: { ttlSeconds?: number }): Promise<void> {
     const ttlQuery = options?.ttlSeconds ? `?EX=${encodeURIComponent(String(options.ttlSeconds))}` : ''
-    await this.request(`set/${encodeURIComponent(this.fullKey(key))}/${encodeURIComponent(JSON.stringify(value))}${ttlQuery}`)
+    await this.request(`set/${encodeURIComponent(this.fullKey(key))}${ttlQuery}`, {
+      method: 'POST',
+      body: JSON.stringify(value),
+    })
   }
 
-  private async request<T>(path: string): Promise<T> {
+  private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
     const response = await this.fetchImpl(`${this.baseUrl}/${path}`, {
+      ...init,
       headers: {
+        ...init.headers,
         Authorization: `Bearer ${this.token}`,
       },
     })

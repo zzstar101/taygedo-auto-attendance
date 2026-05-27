@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import worker from '../src/runtimes/cloudflare-worker.js'
+import worker, { constantTimeTokenMatches } from '../src/runtimes/cloudflare-worker.js'
 
 type ScheduledController = Record<string, unknown>
 type ExecutionContext = Record<string, unknown>
@@ -27,6 +27,15 @@ describe('cloudflare worker runtime', () => {
 
     expect(denied.status).toBe(401)
     expect(allowed.status).toBe(200)
+  })
+
+  it('compares admin tokens without short-circuiting on the first mismatch', () => {
+    const expected = 'Bearer secret'
+
+    expect(constantTimeTokenMatches(expected, 'Bearer secret')).toBe(true)
+    expect(constantTimeTokenMatches(expected, 'Bearer secreu')).toBe(false)
+    expect(constantTimeTokenMatches(expected, 'Bearer x')).toBe(false)
+    expect(constantTimeTokenMatches(expected, null)).toBe(false)
   })
 
   it('force runs manual attendance from the query string', async () => {
@@ -97,6 +106,25 @@ describe('cloudflare worker runtime', () => {
     expect(await response.json()).toEqual(expect.objectContaining({
       error: expect.stringContaining('TAYGEDO_CREDENTIAL_KEY'),
     }))
+  })
+
+  it('rejects invalid Cloudflare login request fields before calling the login service', async () => {
+    const kv = new Map<string, string>()
+    const env = createEnv(kv, { TAYGEDO_ADMIN_TOKEN: 'secret', TAYGEDO_CREDENTIAL_KEY: 'test-credential-key' })
+
+    const response = await worker.fetch(new Request('https://example.com/login', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer secret' },
+      body: JSON.stringify({
+        mode: 'password',
+        phone: 'not-a-phone',
+        password: 'secret-password',
+        accountId: '../main',
+      }),
+    }), env, {} as ExecutionContext)
+
+    expect(response.status).toBe(400)
+    expect(env.TAYGEDO_TEST_LOGIN_API.loginWithPassword).not.toHaveBeenCalled()
   })
 
   it('treats Cloudflare login without mode as password login when checking credential key', async () => {

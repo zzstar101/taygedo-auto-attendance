@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { buildH5Request, buildNativeRequest, makeDs } from '../src/taygedo/protocol.js'
+import { buildH5Request, buildNativeRequest, makeDs, nonceIndexFromByte } from '../src/taygedo/protocol.js'
 
 describe('taygedo protocol helpers', () => {
   it('builds a deterministic ds signature', () => {
@@ -50,5 +50,11 @@ describe('taygedo protocol helpers', () => {
       Referer: 'https://webstatic.tajiduo.com/',
     }))
     expect(request.init.headers).not.toHaveProperty('ds')
+  })
+
+  it('rejects random bytes that would bias nonce character selection', () => {
+    expect(nonceIndexFromByte(247)).toBe(61)
+    expect(nonceIndexFromByte(248)).toBeUndefined()
+    expect(nonceIndexFromByte(255)).toBeUndefined()
   })
 })

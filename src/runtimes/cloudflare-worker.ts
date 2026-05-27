@@ -35,7 +35,7 @@ const worker = {
     }
 
     const config = loadRuntimeConfig(envToStrings(env))
-    if (config.adminToken && request.headers.get('Authorization') !== `Bearer ${config.adminToken}`) {
+    if (config.adminToken && !constantTimeTokenMatches(`Bearer ${config.adminToken}`, request.headers.get('Authorization'))) {
       return Response.json({ error: '未授权' }, { status: 401 })
     }
 
@@ -366,13 +366,13 @@ interface LoginRequestBody {
 
 async function readLoginBody(request: Request): Promise<LoginRequestBody> {
   if (request.method !== 'POST') {
-    throw new Error('Cloudflare 登录接口必须使用 POST')
+    throw new HttpError(405, 'Cloudflare 登录接口必须使用 POST')
   }
-  const body = await request.json() as Partial<LoginRequestBody>
-  if (!body.phone) {
-    throw new Error('缺少登录手机号')
+  const body = await request.json() as unknown
+  if (!isRecord(body)) {
+    throw new HttpError(400, '登录请求必须是 JSON 对象')
   }
-  return body as LoginRequestBody
+  return validateLoginBody(body)
 }
 
 async function tryReadCloudflareAccounts(env: CloudflareEnv, key: string, fallback?: string): Promise<string | undefined> {
@@ -390,4 +390,103 @@ function envToStrings(env: CloudflareEnv): Record<string, string | undefined> {
     }
   }
   return values
+}
+
+export function constantTimeTokenMatches(expected: string, actual: string | null): boolean {
+  const expectedBytes = new TextEncoder().encode(expected)
+  const actualBytes = new TextEncoder().encode(actual ?? '')
+  const length = Math.max(expectedBytes.length, actualBytes.length)
+  let diff = expectedBytes.length ^ actualBytes.length
+
+  for (let index = 0; index < length; index++) {
+    diff |= (expectedBytes[index] ?? 0) ^ (actualBytes[index] ?? 0)
+  }
+
+  return diff === 0
+}
+
+function validateLoginBody(body: Record<string, unknown>): LoginRequestBody {
+  const mode = optionalStringField(body, 'mode') ?? 'password'
+  if (mode !== 'password' && mode !== 'send-code' && mode !== 'login') {
+    throw new HttpError(400, '登录模式无效')
+  }
+
+  const phone = requiredStringField(body, 'phone', 32)
+  if (!/^1\d{10}$/.test(phone)) {
+    throw new HttpError(400, '登录手机号格式无效')
+  }
+
+  const result: LoginRequestBody = { mode, phone }
+  const password = optionalStringField(body, 'password', 256, { trim: false })
+  if (password !== undefined) {
+    result.password = password
+  }
+  const captcha = optionalStringField(body, 'captcha', 16)
+  if (captcha !== undefined) {
+    if (!/^\d{4,8}$/.test(captcha)) {
+      throw new HttpError(400, '短信验证码格式无效')
+    }
+    result.captcha = captcha
+  }
+  const deviceId = optionalStringField(body, 'deviceId', 128)
+  if (deviceId !== undefined) {
+    if (!/^[A-Za-z0-9._:-]{1,128}$/.test(deviceId)) {
+      throw new HttpError(400, '设备 ID 格式无效')
+    }
+    result.deviceId = deviceId
+  }
+  const accountId = optionalStringField(body, 'accountId', 64)
+  if (accountId !== undefined) {
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(accountId)) {
+      throw new HttpError(400, '账号 ID 格式无效')
+    }
+    result.accountId = accountId
+  }
+  const accountName = optionalStringField(body, 'accountName', 64)
+  if (accountName !== undefined) {
+    result.accountName = accountName
+  }
+  if (body.newDevice !== undefined) {
+    if (typeof body.newDevice !== 'boolean') {
+      throw new HttpError(400, 'newDevice 必须是布尔值')
+    }
+    result.newDevice = body.newDevice
+  }
+
+  return result
+}
+
+function requiredStringField(body: Record<string, unknown>, field: string, maxLength: number): string {
+  const value = optionalStringField(body, field, maxLength)
+  if (value === undefined) {
+    throw new HttpError(400, `缺少${field}`)
+  }
+  return value
+}
+
+function optionalStringField(
+  body: Record<string, unknown>,
+  field: string,
+  maxLength = 128,
+  options: { trim?: boolean } = {},
+): string | undefined {
+  const value = body[field]
+  if (value === undefined) {
+    return undefined
+  }
+  if (typeof value !== 'string') {
+    throw new HttpError(400, `${field} 必须是字符串`)
+  }
+  const trimmed = options.trim === false ? value : value.trim()
+  if (trimmed === '') {
+    return undefined
+  }
+  if (trimmed.length > maxLength) {
+    throw new HttpError(400, `${field} 过长`)
+  }
+  return trimmed
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }

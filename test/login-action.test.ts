@@ -290,8 +290,10 @@ describe('runLoginAction', () => {
       const account = JSON.parse(payload)[0]
       expect(payload).not.toContain('secret-password')
       expect(account.encryptedPassword).toEqual(expect.objectContaining({
-        v: 1,
+        v: 2,
         alg: 'AES-256-GCM',
+        kdf: 'scrypt',
+        salt: expect.any(String),
         iv: expect.any(String),
         tag: expect.any(String),
         data: expect.any(String),
