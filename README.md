@@ -352,6 +352,98 @@ docker compose run --rm taygedo-attendance
 
 </details>
 
+### 青龙面板部署
+
+适合已经使用青龙面板管理定时任务的用户。青龙脚本复用本地 CLI，账号文件、加密密钥和每日去重状态默认保存在 `/ql/data/taygedo-auto-attendance`。
+
+<details>
+<summary>展开查看详细步骤</summary>
+
+#### 1. 拉取仓库
+
+在青龙面板的订阅管理中添加仓库，或进入青龙容器后手动拉取：
+
+```bash
+cd /ql/data/scripts
+git clone https://github.com/zzstar101/taygedo-auto-attendance.git
+cd taygedo-auto-attendance
+```
+
+青龙需要 Node.js 18 或更高版本。首次执行 `scripts/qinglong.sh` 时会自动安装项目依赖；如果青龙没有 `pnpm`，脚本会依次尝试 `corepack pnpm` 和 `npm install`。
+
+#### 2. 首次登录生成账号文件
+
+在青龙环境变量中添加：
+
+```text
+TAYGEDO_LOGIN_MODE=password
+TAYGEDO_LOGIN_PHONE=你的手机号
+TAYGEDO_LOGIN_PASSWORD=你的塔吉多密码
+TAYGEDO_LOGIN_ACCOUNT_ID=main
+TAYGEDO_LOGIN_ACCOUNT_NAME=主账号
+```
+
+然后在青龙任务中手动运行一次：
+
+```bash
+cd /ql/data/scripts/taygedo-auto-attendance && bash scripts/qinglong.sh login
+```
+
+脚本会生成：
+
+```text
+/ql/data/taygedo-auto-attendance/accounts.json
+/ql/data/taygedo-auto-attendance/credential-key
+```
+
+如果你已经有账号 JSON，也可以直接把它放进青龙环境变量 `TAYGEDO_ACCOUNTS`。脚本首次运行时会写入 `/ql/data/taygedo-auto-attendance/accounts.json`；如需强制覆盖已有账号文件，设置：
+
+```text
+TAYGEDO_ACCOUNTS_OVERWRITE=true
+```
+
+#### 3. 添加定时签到任务
+
+青龙定时任务命令：
+
+```bash
+cd /ql/data/scripts/taygedo-auto-attendance && bash scripts/qinglong.sh
+```
+
+建议定时规则设置为每天北京时间凌晨后执行一次，例如：
+
+```text
+15 1 * * *
+```
+
+强制忽略今日去重并重跑：
+
+```bash
+cd /ql/data/scripts/taygedo-auto-attendance && TAYGEDO_FORCE_RUN=true bash scripts/qinglong.sh
+```
+
+#### 4. 可选配置
+
+```text
+TAYGEDO_SERVERCHAN_SENDKEY=SCTxxxxxxxxxxxxxxxxxxxxxxxx
+TAYGEDO_NOTIFICATION_URLS=https://example.com/webhook
+TAYGEDO_MAX_RETRIES=3
+TAYGEDO_ACCOUNT_CONCURRENCY=1
+TAYGEDO_COIN_TASKS=true
+TAYGEDO_SHARE_PLATFORM=qq
+```
+
+如果不想使用默认数据目录，可以指定：
+
+```text
+TAYGEDO_DATA_DIR=/ql/data/taygedo-auto-attendance
+TAYGEDO_ACCOUNTS_FILE=/ql/data/taygedo-auto-attendance/accounts.json
+TAYGEDO_STATE_DIR=/ql/data/taygedo-auto-attendance/state
+TAYGEDO_CREDENTIAL_KEY_PATH=/ql/data/taygedo-auto-attendance/credential-key
+```
+
+</details>
+
 ### 本地 CLI
 
 适合开发调试或在自己的定时任务里调用。账号文件和状态文件都保存在本地目录。
