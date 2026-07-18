@@ -34,5 +34,8 @@ jobs:
       - name: Build
         run: pnpm build
 
+      - name: Cloudflare Worker build smoke test
+        run: pnpm worker:build
+
       - name: Docker build smoke test
         run: docker build -t taygedo-auto-attendance:ci .

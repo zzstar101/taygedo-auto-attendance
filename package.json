@@ -9,6 +9,7 @@
     "action": "tsx src/action.ts",
     "local": "tsx src/runtimes/local-cli.ts",
     "worker:dev": "wrangler dev",
+    "worker:build": "wrangler deploy --dry-run",
     "deploy": "wrangler deploy",
     "cloud:function:build": "node scripts/build-cloud-function.mjs",
     "cloud:function:pack": "node scripts/build-cloud-function.mjs --pack",

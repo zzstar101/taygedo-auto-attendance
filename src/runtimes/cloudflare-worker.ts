@@ -1,7 +1,7 @@
 import { loadRuntimeConfig } from '../config/runtime.js'
 import { AttendanceService } from '../services/attendance-service.js'
 import { LoginService } from '../services/login-service.js'
-import { createAccountStore, createStateStore } from '../stores/factory.js'
+import { createCloudflareAccountStore, createCloudflareStateStore } from '../stores/cloudflare-factory.js'
 import { TaygedoApi } from '../taygedo/api.js'
 import type { LoginActionDependencies } from '../login-action.js'
 
@@ -299,8 +299,8 @@ function renderManagementPage(): string {
 async function runCloudflareAttendance(env: CloudflareEnv, forceRun?: boolean) {
   const config = loadRuntimeConfig(envToStrings(env))
   const service = new AttendanceService({
-    accountStore: createAccountStore({ config, kv: env.KV }),
-    stateStore: createStateStore({ config, kv: env.KV }),
+    accountStore: createCloudflareAccountStore({ config, kv: env.KV }),
+    stateStore: createCloudflareStateStore({ config, kv: env.KV }),
     api: env.TAYGEDO_TEST_API ?? new TaygedoApi(),
     accountPasswords: config.accountPasswords,
     credentialKey: config.credentialKey,

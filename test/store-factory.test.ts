@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { loadRuntimeConfig } from '../src/config/runtime.js'
+import { createCloudflareAccountStore, createCloudflareStateStore } from '../src/stores/cloudflare-factory.js'
 import { createAccountStore, createStateStore } from '../src/stores/factory.js'
-import { EnvAccountStore, FileAccountStore, UpstashAccountStore } from '../src/stores/account-store.js'
-import { FileStateStore, MemoryStateStore, UpstashStateStore } from '../src/stores/state-store.js'
+import { CloudflareKvAccountStore, EnvAccountStore, FileAccountStore, UpstashAccountStore } from '../src/stores/account-store.js'
+import { CloudflareKvStateStore, FileStateStore, MemoryStateStore, UpstashStateStore } from '../src/stores/state-store.js'
 import { chooseUnstorageDriver } from '../src/stores/unstorage-store.js'
 
 describe('store factories', () => {
@@ -63,5 +64,33 @@ describe('store factories', () => {
       TAYGEDO_UPSTASH_REDIS_REST_TOKEN: 'token',
     }).name).toBe('upstash')
     expect(chooseUnstorageDriver({}).name).toBe('fs')
+  })
+
+  it('creates Cloudflare-compatible stores without loading unstorage drivers', () => {
+    const config = loadRuntimeConfig({
+      TAYGEDO_ACCOUNT_STORE: 'cloudflare-kv',
+      TAYGEDO_STATE_STORE: 'cloudflare-kv',
+    })
+    const kv = {
+      get: async () => null,
+      put: async () => undefined,
+    }
+
+    expect(createCloudflareAccountStore({ config, kv })).toBeInstanceOf(CloudflareKvAccountStore)
+    expect(createCloudflareStateStore({ config, kv })).toBeInstanceOf(CloudflareKvStateStore)
+  })
+
+  it('rejects Node-only stores in the Cloudflare factory', () => {
+    const config = loadRuntimeConfig({
+      TAYGEDO_ACCOUNT_STORE: 'unstorage',
+      TAYGEDO_STATE_STORE: 'file',
+    })
+    const kv = {
+      get: async () => null,
+      put: async () => undefined,
+    }
+
+    expect(() => createCloudflareAccountStore({ config, kv })).toThrow('Cloudflare Worker 不支持账号存储：unstorage')
+    expect(() => createCloudflareStateStore({ config, kv })).toThrow('Cloudflare Worker 不支持状态存储：file')
   })
 })
