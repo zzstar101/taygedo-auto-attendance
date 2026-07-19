@@ -247,7 +247,7 @@ describe('TaygedoApi', () => {
         method: 'GET',
         headers: expect.objectContaining({
           Authorization: 'access-token',
-          appversion: '1.2.2',
+          appversion: '1.2.4',
           platform: 'ios',
           uid: 'uid-1',
           deviceid: 'device-1',
@@ -337,12 +337,16 @@ describe('TaygedoApi', () => {
         method: 'POST',
         headers: expect.objectContaining({
           deviceid: 'device-1',
-          appversion: '1.2.2',
+          appversion: '1.2.4',
           platform: 'ios',
           ds: expect.any(String),
+          authorization: '',
+          'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+          'User-Agent': 'okhttp/4.12.0',
         }),
       }),
     )
+    expect(fetchMock.mock.calls[3]?.[1]?.headers).not.toHaveProperty('uid')
   })
 
   it('logs in with a password through the laohu secureLogin endpoint', async () => {
@@ -389,6 +393,17 @@ describe('TaygedoApi', () => {
 
     await expect(api.loginWithPassword('13800138000', 'secret-password', 'device-1')).rejects.toThrow(
       'loginWithPassword：系统错误',
+    )
+  })
+
+  it('includes the upstream response code when user center login fails', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ code: 22, msg: '系统错误' }), { status: 200 }),
+    )
+    const api = new TaygedoApi({ fetch: fetchMock })
+
+    await expect(api.userCenterLogin('laohu-token', 'user-1', 'device-1')).rejects.toThrow(
+      'userCenterLogin：系统错误（HTTP 200，code=22）',
     )
   })
 

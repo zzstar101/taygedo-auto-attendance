@@ -1,11 +1,11 @@
 import { createHash, randomBytes } from 'node:crypto'
 
 export const TAYGEDO_BASE_URL = 'https://bbs-api.tajiduo.com'
-export const TAYGEDO_APP_VER = '1.2.2'
+export const TAYGEDO_APP_VER = '1.2.4'
 export const TAYGEDO_DS_SECRET = 'pUds3dfMkl'
 export const H5_ORIGIN = 'https://webstatic.tajiduo.com'
 
-const NATIVE_USER_AGENT = 'Tajiduo/1.2.2 (iPhone; iOS 17.0; Scale/3.00)'
+const NATIVE_USER_AGENT = 'okhttp/4.12.0'
 const H5_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Tajiduo/1.2.2'
 const NONCE_ALPHABET = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
 

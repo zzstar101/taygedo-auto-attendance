@@ -1,5 +1,5 @@
 import { createCipheriv, createHash } from 'node:crypto'
-import { buildH5Request, buildNativeRequest, TAYGEDO_BASE_URL } from './protocol.js'
+import { buildH5Request, buildNativeRequest, makeDs, TAYGEDO_APP_VER, TAYGEDO_BASE_URL } from './protocol.js'
 import type { DeviceIdentity } from './device.js'
 
 const LAOHU_BASE_URL = 'https://user.laohu.com'
@@ -279,19 +279,23 @@ export class TaygedoApi {
   }
 
   async userCenterLogin(token: string, userId: string, deviceId: string): Promise<UserCenterLoginResponse> {
-    const request = buildNativeRequest({
-      accessToken: '',
-      uid: '0',
-      deviceId,
+    const response = await this.fetchImpl(`${TAYGEDO_BASE_URL}/usercenter/api/login`, {
       method: 'POST',
-      path: '/usercenter/api/login',
-      body: {
+      headers: {
+        authorization: '',
+        appversion: TAYGEDO_APP_VER,
+        platform: 'ios',
+        deviceid: deviceId,
+        ds: makeDs(),
+        'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+        'User-Agent': 'okhttp/4.12.0',
+      },
+      body: formEncode({
         token,
         userIdentity: userId,
         appId: LAOHU_IOS_APP_ID,
-      },
+      }),
     })
-    const response = await this.fetchImpl(request.url, request.init)
 
     const data = await readJson(response, 'userCenterLogin') as {
       code?: number
@@ -821,10 +825,10 @@ function apiResponseError(
   fallback: string,
 ): Error {
   const msg = (data.message ?? data.msg)?.trim()
-  if (msg && msg.toLowerCase() !== 'ok') {
-    return new Error(`${endpointName}：${msg}`)
-  }
   const code = data.code === undefined ? 'unknown' : String(data.code)
+  if (msg && msg.toLowerCase() !== 'ok') {
+    return new Error(`${endpointName}：${msg}（HTTP ${response.status}，code=${code}）`)
+  }
   const msgText = msg ? `，msg=${msg}` : ''
   return new Error(`${endpointName} 请求失败（HTTP ${response.status}，code=${code}${msgText}，响应：${summarizeResponse(JSON.stringify(data))}）`)
 }
