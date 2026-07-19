@@ -337,7 +337,9 @@ describe('TaygedoApi', () => {
         method: 'POST',
         headers: expect.objectContaining({
           deviceid: 'device-1',
-          appversion: '1.1.0',
+          appversion: '1.2.2',
+          platform: 'ios',
+          ds: expect.any(String),
         }),
       }),
     )
@@ -349,7 +351,10 @@ describe('TaygedoApi', () => {
     )
     const api = new TaygedoApi({ fetch: fetchMock })
 
-    expect(await api.loginWithPassword('13800138000', 'secret-password', 'device-1')).toEqual({
+    expect(await api.loginWithPassword('13800138000', 'secret-password', 'device-1', {
+      openudid: '11111111-1111-4111-8111-111111111111',
+      vendorid: '22222222-2222-4222-8222-222222222222',
+    })).toEqual({
       token: 'laohu-token',
       userId: 'user-1',
     })
@@ -359,8 +364,8 @@ describe('TaygedoApi', () => {
       expect.objectContaining({
         method: 'POST',
         headers: expect.objectContaining({
-          platform: 'android',
           'Content-Type': 'application/x-www-form-urlencoded',
+          'User-Agent': expect.stringContaining('HTAssistant/'),
         }),
         body: expect.any(String),
       }),
@@ -369,8 +374,22 @@ describe('TaygedoApi', () => {
     const body = String(fetchMock.mock.calls[0]?.[1]?.body)
     expect(body).toContain('username=')
     expect(body).toContain('password=')
+    expect(body).toContain('openudid=11111111-1111-4111-8111-111111111111')
+    expect(body).toContain('vendorid=22222222-2222-4222-8222-222222222222')
+    expect(body).toContain('appId=10551')
     expect(body).not.toContain('13800138000')
     expect(body).not.toContain('secret-password')
+  })
+
+  it('identifies which login stage returned an upstream business error', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ code: 1, message: '系统错误' }), { status: 200 }),
+    )
+    const api = new TaygedoApi({ fetch: fetchMock })
+
+    await expect(api.loginWithPassword('13800138000', 'secret-password', 'device-1')).rejects.toThrow(
+      'loginWithPassword：系统错误',
+    )
   })
 
   it('claims cloud yihuan duration through the laohu cloud endpoint', async () => {

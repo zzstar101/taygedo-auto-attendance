@@ -146,7 +146,10 @@ describe('runLoginAction', () => {
 
       expect(api.checkCaptcha).not.toHaveBeenCalled()
       expect(api.loginWithCaptcha).not.toHaveBeenCalled()
-      expect(api.loginWithPassword).toHaveBeenCalledWith('13800138000', 'secret-password', 'device-generated')
+      expect(api.loginWithPassword).toHaveBeenCalledWith('13800138000', 'secret-password', 'device-generated', {
+        openudid: 'OPEN-GENERATED',
+        vendorid: 'VENDOR-GENERATED',
+      })
       expect(api.userCenterLogin).toHaveBeenCalledWith('laohu-token', 'laohu-user', 'device-generated')
       expect(JSON.parse(await readFile(accountsPath, 'utf8'))).toEqual([
         {
@@ -378,7 +381,10 @@ describe('runLoginAction', () => {
         generateDeviceIdentity: () => ({ deviceId: 'new-device', openudid: 'OPEN-NEW', vendorid: 'VENDOR-NEW' }),
       })
 
-      expect(api.loginWithPassword).toHaveBeenCalledWith('13800138000', 'secret-password', 'new-device')
+      expect(api.loginWithPassword).toHaveBeenCalledWith('13800138000', 'secret-password', 'new-device', {
+        openudid: 'OPEN-NEW',
+        vendorid: 'VENDOR-NEW',
+      })
       expect(JSON.parse(await readFile(accountsPath, 'utf8'))[0]).toEqual(expect.objectContaining({
         deviceId: 'new-device',
         openudid: 'OPEN-NEW',

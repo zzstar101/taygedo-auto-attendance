@@ -49,7 +49,9 @@ const worker = {
       if (error instanceof HttpError) {
         return Response.json({ error: error.message }, { status: error.status })
       }
-      throw error
+      return Response.json({
+        error: error instanceof Error ? error.message : String(error),
+      }, { status: 502 })
     }
 
     if (url.pathname === '/run') {

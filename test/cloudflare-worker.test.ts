@@ -127,6 +127,25 @@ describe('cloudflare worker runtime', () => {
     expect(env.TAYGEDO_TEST_LOGIN_API.loginWithPassword).not.toHaveBeenCalled()
   })
 
+  it('returns upstream login failures as JSON instead of throwing a Worker exception', async () => {
+    const env = createEnv(new Map(), { TAYGEDO_ADMIN_TOKEN: 'secret', TAYGEDO_CREDENTIAL_KEY: 'test-credential-key' })
+    env.TAYGEDO_TEST_LOGIN_API.loginWithPassword.mockRejectedValueOnce(new Error('系统错误'))
+
+    const response = await worker.fetch(new Request('https://example.com/login', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer secret' },
+      body: JSON.stringify({
+        mode: 'password',
+        phone: '13800138000',
+        password: 'secret-password',
+        accountId: 'main',
+      }),
+    }), env, {} as ExecutionContext)
+
+    expect(response.status).toBe(502)
+    expect(await response.json()).toEqual({ error: '系统错误' })
+  })
+
   it('treats Cloudflare login without mode as password login when checking credential key', async () => {
     const env = createEnv(new Map(), { TAYGEDO_ADMIN_TOKEN: 'secret' })
 

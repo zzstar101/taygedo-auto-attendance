@@ -49,7 +49,10 @@ export async function runLoginAction(deps: LoginActionDependencies = {}): Promis
     if (!api.loginWithPassword) {
       throw new Error('当前 API 客户端不支持密码登录')
     }
-    loginResult = await api.loginWithPassword(phone, requireEnv(env, 'TAYGEDO_LOGIN_PASSWORD'), device.deviceId)
+    loginResult = await api.loginWithPassword(phone, requireEnv(env, 'TAYGEDO_LOGIN_PASSWORD'), device.deviceId, {
+      openudid: device.openudid,
+      vendorid: device.vendorid,
+    })
   }
   else {
     const captcha = requireEnv(env, 'TAYGEDO_LOGIN_CAPTCHA')

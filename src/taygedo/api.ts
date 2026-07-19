@@ -1,8 +1,14 @@
 import { createCipheriv, createHash } from 'node:crypto'
 import { buildH5Request, buildNativeRequest, TAYGEDO_BASE_URL } from './protocol.js'
+import type { DeviceIdentity } from './device.js'
 
 const LAOHU_BASE_URL = 'https://user.laohu.com'
 const LAOHU_SECRET = '89155cc4e8634ec5b1b6364013b23e3e'
+const LAOHU_IOS_SECRET = '5fd254cc0c8740d7a57376415ce40ede'
+const LAOHU_IOS_APP_ID = '10551'
+const LAOHU_IOS_CHANNEL_ID = '2'
+const LAOHU_IOS_SDK_VERSION = '4.131.0'
+const LAOHU_IOS_USER_AGENT = 'HTAssistant/1.2.2 (iPhone; iOS 26.1; Scale/3.00)'
 const CLOUD_APP_ID = '10597'
 const CLOUD_APP_KEY = 'f1b7f11fc3774f898e387368cce4da04'
 const CLOUD_CHANNEL_ID = '9'
@@ -210,32 +216,44 @@ export class TaygedoApi {
     }
   }
 
-  async loginWithPassword(phone: string, password: string, deviceId: string): Promise<LoginWithCaptchaResponse> {
+  async loginWithPassword(
+    phone: string,
+    password: string,
+    deviceId: string,
+    device: Partial<Pick<DeviceIdentity, 'openudid' | 'vendorid'>> = {},
+  ): Promise<LoginWithCaptchaResponse> {
+    const openudid = device.openudid ?? stableUuid(`${deviceId}:openudid`)
+    const vendorid = device.vendorid ?? stableUuid(`${deviceId}:vendorid`)
     const body = signedLaohuBody({
-      deviceType: 'LGE-AN10',
-      idfa: '',
-      sign: '',
+      adid: deviceId,
       adm: '',
-      deviceId,
-      version: '1',
-      deviceName: 'LGE-AN10',
-      mac: '',
-      t: String(Date.now()),
-      appId: '10550',
-      deviceSys: '12',
-      username: aesBase64Encode(phone),
-      password: aesBase64Encode(password),
-      deviceModel: 'LGE-AN10',
-      sdkVersion: '4.129.0',
+      appId: LAOHU_IOS_APP_ID,
       bid: 'com.pwrd.htassistant',
-      channelId: '1',
-    })
+      channelId: LAOHU_IOS_CHANNEL_ID,
+      deviceId,
+      deviceModel: 'iPhone',
+      deviceName: 'iPhone',
+      deviceSys: '26.1',
+      deviceType: 'iPhone17,2',
+      iOSAppOnMac: '0',
+      idfa: '00000000-0000-0000-0000-000000000000',
+      idfv: vendorid,
+      mac: deviceId,
+      openudid,
+      osType: '1',
+      password: aesBase64Encode(password, LAOHU_IOS_SECRET),
+      sdkVersion: LAOHU_IOS_SDK_VERSION,
+      t: String(Date.now()),
+      username: aesBase64Encode(phone, LAOHU_IOS_SECRET),
+      vendorid,
+      version: '1.2.2',
+    }, LAOHU_IOS_SECRET)
 
     const response = await this.fetchImpl(`${LAOHU_BASE_URL}/openApi/secureLogin`, {
       method: 'POST',
       headers: {
-        platform: 'android',
         'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent': LAOHU_IOS_USER_AGENT,
       },
       body,
     })
@@ -261,23 +279,19 @@ export class TaygedoApi {
   }
 
   async userCenterLogin(token: string, userId: string, deviceId: string): Promise<UserCenterLoginResponse> {
-    const response = await this.fetchImpl(`${TAYGEDO_BASE_URL}/usercenter/api/login`, {
+    const request = buildNativeRequest({
+      accessToken: '',
+      uid: '0',
+      deviceId,
       method: 'POST',
-      headers: {
-        platform: 'android',
-        deviceid: deviceId,
-        authorization: '',
-        appversion: '1.1.0',
-        uid: '10000000',
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'User-Agent': 'okhttp/4.12.0',
-      },
-      body: formEncode({
+      path: '/usercenter/api/login',
+      body: {
         token,
         userIdentity: userId,
-        appId: '10551',
-      }),
+        appId: LAOHU_IOS_APP_ID,
+      },
     })
+    const response = await this.fetchImpl(request.url, request.init)
 
     const data = await readJson(response, 'userCenterLogin') as {
       code?: number
@@ -736,17 +750,17 @@ export class TaygedoApi {
   }
 }
 
-function signedLaohuBody(data: Record<string, string>): string {
+function signedLaohuBody(data: Record<string, string>, secret = LAOHU_SECRET): string {
   const withSign = {
     ...data,
-    sign: laohuSign(data),
+    sign: laohuSign(data, secret),
   }
   return formEncode(withSign)
 }
 
-function laohuSign(data: Record<string, string>): string {
+function laohuSign(data: Record<string, string>, secret = LAOHU_SECRET): string {
   const values = Object.keys(data).sort().map(key => data[key]).join('')
-  return createHash('md5').update(`${values}${LAOHU_SECRET}`, 'utf8').digest('hex')
+  return createHash('md5').update(`${values}${secret}`, 'utf8').digest('hex')
 }
 
 function signedCloudBody(data: Record<string, string>): string {
@@ -762,14 +776,19 @@ function cloudSign(data: Record<string, string>): string {
   return createHash('md5').update(`${values}${CLOUD_APP_KEY}`, 'utf8').digest('hex')
 }
 
-function aesBase64Encode(value: string): string {
-  const key = Buffer.from(LAOHU_SECRET.slice(-16), 'utf8')
+function aesBase64Encode(value: string, secret = LAOHU_SECRET): string {
+  const key = Buffer.from(secret.slice(-16), 'utf8')
   // ECB does not use an IV. Workerd's node:crypto compatibility layer rejects
   // null here even though Node.js accepts it, while a zero-length buffer works
   // in both runtimes and still represents "no IV".
   const cipher = createCipheriv('aes-128-ecb', key, Buffer.alloc(0))
   cipher.setAutoPadding(true)
   return Buffer.concat([cipher.update(value, 'utf8'), cipher.final()]).toString('base64')
+}
+
+function stableUuid(seed: string): string {
+  const hex = createHash('md5').update(seed, 'utf8').digest('hex').toUpperCase()
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20)}`
 }
 
 function formEncode(data: Record<string, string>): string {
@@ -803,7 +822,7 @@ function apiResponseError(
 ): Error {
   const msg = (data.message ?? data.msg)?.trim()
   if (msg && msg.toLowerCase() !== 'ok') {
-    return new Error(msg)
+    return new Error(`${endpointName}：${msg}`)
   }
   const code = data.code === undefined ? 'unknown' : String(data.code)
   const msgText = msg ? `，msg=${msg}` : ''

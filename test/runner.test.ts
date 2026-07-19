@@ -341,7 +341,10 @@ describe('runAttendance', () => {
       secretWriter,
     })
 
-    expect(api.loginWithPassword).toHaveBeenCalledWith('13800138000', 'secret-password', 'device-1')
+    expect(api.loginWithPassword).toHaveBeenCalledWith('13800138000', 'secret-password', 'device-1', {
+      openudid: undefined,
+      vendorid: undefined,
+    })
     expect(api.userCenterLogin).toHaveBeenCalledWith('new-laohu-token', 'new-laohu-user', 'device-1')
     expect(api.refreshToken).not.toHaveBeenCalled()
     expect(result.updatedAccounts[0]).toEqual(expect.objectContaining({
@@ -386,7 +389,10 @@ describe('runAttendance', () => {
       maxRetries: 1,
     })
 
-    expect(api.loginWithPassword).toHaveBeenCalledWith('13800138000', 'secret-password', 'device-1')
+    expect(api.loginWithPassword).toHaveBeenCalledWith('13800138000', 'secret-password', 'device-1', {
+      openudid: undefined,
+      vendorid: undefined,
+    })
     expect(api.refreshToken).not.toHaveBeenCalled()
   })
 
@@ -669,7 +675,10 @@ describe('runAttendance', () => {
       secretWriter,
     })
 
-    expect(api.loginWithPassword).toHaveBeenCalledWith('13800138000', 'secret-password', 'device-1')
+    expect(api.loginWithPassword).toHaveBeenCalledWith('13800138000', 'secret-password', 'device-1', {
+      openudid: undefined,
+      vendorid: undefined,
+    })
     expect(api.cloudGetUserInfo).toHaveBeenCalledWith('new-laohu-token', 'new-laohu-user', 'device-1')
     expect(result.updatedAccounts[0]).toEqual(expect.objectContaining({
       laohuToken: 'new-laohu-token',

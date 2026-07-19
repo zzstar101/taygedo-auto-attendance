@@ -261,7 +261,10 @@ async function refreshOrRebuildSession(
   const password = resolveAccountPassword(account, accountPasswords, credentialKey)
   if (account.phone && password && api.loginWithPassword && api.userCenterLogin) {
     try {
-      const login = await api.loginWithPassword(account.phone, password, account.deviceId)
+      const login = await api.loginWithPassword(account.phone, password, account.deviceId, {
+        openudid: account.openudid,
+        vendorid: account.vendorid,
+      })
       const rebuilt = await api.userCenterLogin(login.token, login.userId, account.deviceId)
       const updatedAccount = withSession(account, {
         accessToken: rebuilt.accessToken,
@@ -575,7 +578,10 @@ async function runCloudDuration(
       }
     }
     try {
-      const login = await api.loginWithPassword(account.phone, password, account.deviceId)
+      const login = await api.loginWithPassword(account.phone, password, account.deviceId, {
+        openudid: account.openudid,
+        vendorid: account.vendorid,
+      })
       laohuToken = login.token
       laohuUserId = login.userId
       updatedAccount = {
