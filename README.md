@@ -55,7 +55,7 @@ Worker 使用绑定名为 `KV` 的 Cloudflare KV。可以从 `TAYGEDO_ACCOUNTS` 
 https://你的-worker.workers.dev/
 ```
 
-登录页仅 Cloudflare Worker 支持，用 `TAYGEDO_ADMIN_TOKEN` 授权。它只用于短信验证码登录或账号密码登录，并把生成的账号配置写入 KV。
+登录页仅 Cloudflare Worker 支持，用 `TAYGEDO_ADMIN_TOKEN` 授权。密码登录可以直接提交；验证码登录会在同一页面先发送验证码，再自动复用设备信息完成登录，并把生成的账号配置写入 KV。
 
 通过密码登录并写入 KV：
 

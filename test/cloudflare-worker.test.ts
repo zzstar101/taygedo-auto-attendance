@@ -175,8 +175,52 @@ describe('cloudflare worker runtime', () => {
     const html = await response.text()
     expect(html).toContain('塔吉多登录')
     expect(html).toContain('password')
-    expect(html).toContain('send-code')
-    expect(html).toContain('生成新设备')
+    expect(html).toContain('value="captcha"')
+    expect(html).toContain('id="send-code"')
+    expect(html).not.toContain('value="send-code"')
+    expect(html).not.toContain('value="login"')
+    expect(html).not.toContain('name="deviceId"')
+  })
+
+  it('keeps one device id across the integrated captcha login flow', async () => {
+    const kv = new Map<string, string>()
+    const env = createEnv(kv, { TAYGEDO_ADMIN_TOKEN: 'secret' })
+
+    const sendResponse = await worker.fetch(new Request('https://example.com/login', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer secret' },
+      body: JSON.stringify({
+        mode: 'send-code',
+        phone: '13800138000',
+        accountId: 'main',
+      }),
+    }), env, {} as ExecutionContext)
+    const sent = await sendResponse.json() as { deviceId?: string }
+
+    expect(sendResponse.status).toBe(200)
+    expect(sent.deviceId).toEqual(expect.any(String))
+    expect(env.TAYGEDO_TEST_LOGIN_API.sendCaptcha).toHaveBeenCalledWith('13800138000', sent.deviceId)
+
+    const loginResponse = await worker.fetch(new Request('https://example.com/login', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer secret' },
+      body: JSON.stringify({
+        mode: 'login',
+        phone: '13800138000',
+        captcha: '123456',
+        deviceId: sent.deviceId,
+        accountId: 'main',
+        accountName: '主账号',
+      }),
+    }), env, {} as ExecutionContext)
+
+    expect(loginResponse.status).toBe(200)
+    expect(env.TAYGEDO_TEST_LOGIN_API.checkCaptcha).toHaveBeenCalledWith('13800138000', '123456', sent.deviceId)
+    expect(env.TAYGEDO_TEST_LOGIN_API.loginWithCaptcha).toHaveBeenCalledWith('13800138000', '123456', sent.deviceId)
+    expect(JSON.parse(kv.get('TAYGEDO_ACCOUNTS') ?? '[]')[0]).toEqual(expect.objectContaining({
+      id: 'main',
+      deviceId: sent.deviceId,
+    }))
   })
 
   it('passes the new-device flag from Cloudflare login requests', async () => {

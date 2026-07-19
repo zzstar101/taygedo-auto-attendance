@@ -3,6 +3,7 @@ import { AttendanceService } from '../services/attendance-service.js'
 import { LoginService } from '../services/login-service.js'
 import { createCloudflareAccountStore, createCloudflareStateStore } from '../stores/cloudflare-factory.js'
 import { TaygedoApi } from '../taygedo/api.js'
+import { generateDeviceIdentity } from '../taygedo/device.js'
 import type { LoginActionDependencies } from '../login-action.js'
 
 type ScheduledController = Record<string, unknown>
@@ -200,11 +201,10 @@ function renderManagementPage(): string {
       <form id="login-form" class="stack">
         <div class="fields">
           <label><span>管理员 Token</span><input id="token" type="password" autocomplete="current-password" required></label>
-          <label><span>登录模式</span>
+          <label><span>登录方式</span>
             <select id="mode" name="mode">
               <option value="password">账号密码登录</option>
-              <option value="send-code">发送短信验证码</option>
-              <option value="login">短信验证码登录</option>
+              <option value="captcha">短信验证码登录</option>
             </select>
           </label>
           <label><span>手机号</span><input id="phone" name="phone" inputmode="tel" autocomplete="tel" required></label>
@@ -212,11 +212,10 @@ function renderManagementPage(): string {
           <label class="captcha-field hidden"><span>短信验证码</span><input id="captcha" name="captcha" inputmode="numeric" autocomplete="one-time-code"></label>
           <label><span>账号 ID</span><input id="account-id" name="accountId" value="main"></label>
           <label><span>账号名称</span><input id="account-name" name="accountName" value="主账号"></label>
-          <label><span>设备 ID</span><input id="device-id" name="deviceId" placeholder="留空自动生成"></label>
-          <label><span>生成新设备</span><input id="new-device" name="newDevice" type="checkbox"></label>
         </div>
         <div class="toolbar">
-          <button id="submit" type="submit">提交登录</button>
+          <button id="submit" type="submit">账号密码登录</button>
+          <button id="send-code" class="secondary hidden" type="button">发送验证码</button>
           <button id="remember" class="secondary" type="button">记住 Token</button>
         </div>
       </form>
@@ -228,60 +227,104 @@ function renderManagementPage(): string {
     const form = document.querySelector('#login-form')
     const modeInput = document.querySelector('#mode')
     const tokenInput = document.querySelector('#token')
+    const phoneInput = document.querySelector('#phone')
+    const captchaInput = document.querySelector('#captcha')
+    const submitButton = document.querySelector('#submit')
+    const sendCodeButton = document.querySelector('#send-code')
     const result = document.querySelector('#result')
+    let captchaDeviceId = ''
+    let captchaPhone = ''
     tokenInput.value = localStorage.getItem('taygedoAdminToken') || ''
 
     function syncMode() {
       const mode = modeInput.value
-      document.querySelector('.password-field').classList.toggle('hidden', mode !== 'password')
-      document.querySelector('.captcha-field').classList.toggle('hidden', mode !== 'login')
-      document.querySelector('#password').required = mode === 'password'
-      document.querySelector('#captcha').required = mode === 'login'
+      const captchaMode = mode === 'captcha'
+      document.querySelector('.password-field').classList.toggle('hidden', captchaMode)
+      document.querySelector('.captcha-field').classList.toggle('hidden', !captchaMode)
+      sendCodeButton.classList.toggle('hidden', !captchaMode)
+      document.querySelector('#password').required = !captchaMode
+      captchaInput.required = captchaMode
+      submitButton.textContent = captchaMode ? '验证码登录' : '账号密码登录'
     }
 
-    function payloadFromForm() {
+    function resetCaptchaSession() {
+      captchaDeviceId = ''
+      captchaPhone = ''
+    }
+
+    function payloadFromForm(modeOverride) {
       const data = new FormData(form)
+      const uiMode = String(data.get('mode') || 'password')
+      const mode = modeOverride || (uiMode === 'captcha' ? 'login' : 'password')
       const payload = {
-        mode: data.get('mode'),
+        mode,
         phone: String(data.get('phone') || '').trim(),
         accountId: String(data.get('accountId') || 'main').trim() || 'main',
         accountName: String(data.get('accountName') || '').trim() || '主账号',
-        deviceId: String(data.get('deviceId') || '').trim() || undefined,
-        newDevice: data.get('newDevice') === 'on',
       }
       const password = String(data.get('password') || '')
       const captcha = String(data.get('captcha') || '').trim()
-      if (payload.mode === 'password') payload.password = password
-      if (payload.mode === 'login') payload.captcha = captcha
+      if (mode === 'password') payload.password = password
+      if (mode === 'login') {
+        payload.captcha = captcha
+        payload.deviceId = captchaDeviceId || undefined
+      }
       return payload
+    }
+
+    async function requestLogin(payload) {
+      const response = await fetch('/login', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          Authorization: 'Bearer ' + tokenInput.value.trim(),
+        },
+        body: JSON.stringify(payload),
+      })
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) throw new Error(data.error || 'HTTP 状态码 ' + response.status)
+      return data
+    }
+
+    async function sendCaptcha() {
+      result.className = 'result'
+      result.textContent = '正在发送验证码...'
+      sendCodeButton.disabled = true
+      try {
+        const payload = payloadFromForm('send-code')
+        const data = await requestLogin(payload)
+        if (!data.deviceId) throw new Error('发送验证码后未返回设备信息，请重试。')
+        captchaDeviceId = data.deviceId
+        captchaPhone = payload.phone
+        result.className = 'result ok'
+        result.textContent = '验证码已发送，请在上方填写短信验证码并登录。'
+        captchaInput.focus()
+      } catch (error) {
+        resetCaptchaSession()
+        result.className = 'result error'
+        result.textContent = error.message
+      } finally {
+        sendCodeButton.disabled = false
+      }
     }
 
     async function submitLogin(event) {
       event.preventDefault()
       result.className = 'result'
       result.textContent = '正在提交...'
-      const button = document.querySelector('#submit')
-      button.disabled = true
+      submitButton.disabled = true
       try {
-        const response = await fetch('/login', {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            Authorization: 'Bearer ' + tokenInput.value.trim(),
-          },
-          body: JSON.stringify(payloadFromForm()),
-        })
-        const data = await response.json().catch(() => ({}))
-        if (!response.ok) throw new Error(data.error || 'HTTP 状态码 ' + response.status)
+        if (modeInput.value === 'captcha' && (!captchaDeviceId || captchaPhone !== phoneInput.value.trim())) {
+          throw new Error('请先为当前手机号发送验证码。')
+        }
+        await requestLogin(payloadFromForm())
         result.className = 'result ok'
-        result.textContent = modeInput.value === 'send-code'
-          ? '验证码已发送，请切换到短信验证码登录。'
-          : '登录成功，账号已写入 KV。'
+        result.textContent = '登录成功，账号已写入 KV。'
       } catch (error) {
         result.className = 'result error'
         result.textContent = error.message
       } finally {
-        button.disabled = false
+        submitButton.disabled = false
       }
     }
 
@@ -290,7 +333,17 @@ function renderManagementPage(): string {
       result.className = 'result ok'
       result.textContent = 'Token 已保存在当前浏览器。'
     })
-    modeInput.addEventListener('change', syncMode)
+    sendCodeButton.addEventListener('click', sendCaptcha)
+    modeInput.addEventListener('change', () => {
+      resetCaptchaSession()
+      captchaInput.value = ''
+      syncMode()
+    })
+    phoneInput.addEventListener('input', () => {
+      if (captchaPhone && captchaPhone !== phoneInput.value.trim()) {
+        resetCaptchaSession()
+      }
+    })
     form.addEventListener('submit', submitLogin)
     syncMode()
   </script>
@@ -331,12 +384,13 @@ async function runCloudflareLogin(request: Request, env: CloudflareEnv) {
   }
   const currentAccounts = await tryReadCloudflareAccounts(env, config.accountsKey, config.accountsSecret)
   const service = new LoginService({ api: env.TAYGEDO_TEST_LOGIN_API ?? new TaygedoApi() })
+  const deviceId = body.deviceId ?? (mode === 'send-code' ? generateDeviceIdentity().deviceId : undefined)
   await service.runLogin({
     mode,
     phone: body.phone,
     password: body.password,
     captcha: body.captcha,
-    deviceId: body.deviceId,
+    deviceId,
     newDevice: body.newDevice,
     accountId: body.accountId ?? 'main',
     accountName: body.accountName ?? body.accountId ?? '主账号',
@@ -345,7 +399,10 @@ async function runCloudflareLogin(request: Request, env: CloudflareEnv) {
     credentialKey: config.credentialKey,
     writeAccounts: payload => env.KV.put(config.accountsKey, payload),
   })
-  return { accountId: body.accountId ?? 'main' }
+  return {
+    accountId: body.accountId ?? 'main',
+    ...(mode === 'send-code' ? { deviceId } : {}),
+  }
 }
 
 class HttpError extends Error {
