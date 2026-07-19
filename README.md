@@ -28,14 +28,16 @@
 <details>
 <summary>展开查看详细步骤</summary>
 
-部署后配置环境变量：
+部署页面只需要填写以下两个 Secret。建议分别运行一次 `openssl rand -hex 32`，生成两段不同的随机字符串：
 
 ```text
-TAYGEDO_ADMIN_TOKEN=手动触发和登录接口使用的随机字符串
-TAYGEDO_CREDENTIAL_KEY=一段随机密钥
+TAYGEDO_ADMIN_TOKEN=第一段随机字符串
+TAYGEDO_CREDENTIAL_KEY=第二段随机字符串
 ```
 
 > 安全提醒：`TAYGEDO_CREDENTIAL_KEY` 必须使用高强度随机密钥，不要使用手机号、生日、短密码或常用短语。它只需要保存在 Cloudflare Secret 中供 Worker 解密账号密码使用，不需要自己记住；丢失后重新 password 登录生成新的加密密码即可。
+
+KV 命名空间会由 Cloudflare 自动创建和绑定。账号、通知地址、重试次数等可选配置不需要在首次部署时填写；账号可以在部署完成后通过 Worker 登录页写入 KV。
 
 可选：
 
@@ -288,6 +290,8 @@ account_name=主账号
 ### Docker 部署
 
 适合已有服务器、NAS 或本地容器环境的用户。默认使用 GHCR 镜像，也可以本地构建。
+
+仓库中的 `.env.selfhost.example` 保留了 Docker、本地 CLI 和其他自托管方式可使用的完整环境变量示例；它不会被 Cloudflare 一键部署识别为必填 Secret。
 
 <details>
 <summary>展开查看详细步骤</summary>

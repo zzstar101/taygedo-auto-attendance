@@ -27,5 +27,15 @@
   },
   "dependencies": {
     "unstorage": "^1.17.5"
+  },
+  "cloudflare": {
+    "bindings": {
+      "TAYGEDO_ADMIN_TOKEN": {
+        "description": "用于保护登录和手动签到接口。请填写独立的随机字符串，例如运行 `openssl rand -hex 32` 生成。"
+      },
+      "TAYGEDO_CREDENTIAL_KEY": {
+        "description": "用于加密保存塔吉多密码。请填写另一段独立的随机字符串，例如运行 `openssl rand -hex 32` 生成。"
+      }
+    }
   }
 }
