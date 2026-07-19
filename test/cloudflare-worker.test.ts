@@ -215,7 +215,7 @@ describe('cloudflare worker runtime', () => {
     }), env, {} as ExecutionContext)
 
     expect(loginResponse.status).toBe(200)
-    expect(env.TAYGEDO_TEST_LOGIN_API.checkCaptcha).toHaveBeenCalledWith('13800138000', '123456', sent.deviceId)
+    expect(env.TAYGEDO_TEST_LOGIN_API.checkCaptcha).not.toHaveBeenCalled()
     expect(env.TAYGEDO_TEST_LOGIN_API.loginWithCaptcha).toHaveBeenCalledWith('13800138000', '123456', sent.deviceId)
     expect(JSON.parse(kv.get('TAYGEDO_ACCOUNTS') ?? '[]')[0]).toEqual(expect.objectContaining({
       id: 'main',

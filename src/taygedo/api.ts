@@ -7,8 +7,9 @@ const LAOHU_SECRET = '89155cc4e8634ec5b1b6364013b23e3e'
 const LAOHU_IOS_SECRET = '5fd254cc0c8740d7a57376415ce40ede'
 const LAOHU_IOS_APP_ID = '10551'
 const LAOHU_IOS_CHANNEL_ID = '2'
-const LAOHU_IOS_SDK_VERSION = '4.131.0'
-const LAOHU_IOS_USER_AGENT = 'HTAssistant/1.2.2 (iPhone; iOS 26.1; Scale/3.00)'
+const LAOHU_IOS_VERSION = '1.2.4'
+const LAOHU_IOS_SDK_VERSION = '4.317.0'
+const LAOHU_IOS_USER_AGENT = 'okhttp/4.12.0'
 const CLOUD_APP_ID = '10597'
 const CLOUD_APP_KEY = 'f1b7f11fc3774f898e387368cce4da04'
 const CLOUD_CHANNEL_ID = '9'
@@ -91,27 +92,17 @@ export class TaygedoApi {
 
   async sendCaptcha(phone: string, deviceId: string): Promise<void> {
     const body = signedLaohuBody({
-      deviceType: 'LGE-AN10',
-      type: '16',
-      deviceId,
-      deviceName: 'LGE-AN10',
-      versionCode: '1',
-      t: String(Math.floor(Date.now() / 1000)),
+      ...laohuIosBaseParams(deviceId, {}, String(Math.floor(Date.now() / 1000))),
       areaCodeId: '1',
-      appId: '10550',
-      deviceSys: '12',
       cellphone: phone,
-      deviceModel: 'LGE-AN10',
-      sdkVersion: '4.129.0',
-      bid: 'com.pwrd.htassistant',
-      channelId: '1',
-    })
+      type: '18',
+    }, LAOHU_IOS_SECRET)
 
     const response = await this.fetchImpl(`${LAOHU_BASE_URL}/m/newApi/sendPhoneCaptchaWithOutLogin`, {
       method: 'POST',
       headers: {
-        platform: 'android',
         'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent': LAOHU_IOS_USER_AGENT,
       },
       body,
     })
@@ -127,71 +118,25 @@ export class TaygedoApi {
     }
   }
 
-  async checkCaptcha(phone: string, captcha: string, deviceId: string): Promise<void> {
-    const body = signedLaohuBody({
-      deviceType: 'LGE-AN10',
-      deviceId,
-      deviceName: 'LGE-AN10',
-      t: String(Math.floor(Date.now() / 1000)),
-      areaCodeId: '1',
-      appId: '10550',
-      deviceSys: '12',
-      cellphone: phone,
-      captcha,
-      deviceModel: 'LGE-AN10',
-      sdkVersion: '4.129.0',
-      bid: 'com.pwrd.htassistant',
-      channelId: '1',
-    })
-
-    const response = await this.fetchImpl(`${LAOHU_BASE_URL}/m/newApi/checkPhoneCaptchaWithOutLogin`, {
-      method: 'POST',
-      headers: {
-        platform: 'android',
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body,
-    })
-
-    const data = await readJson(response, 'checkCaptcha') as {
-      code?: number
-      message?: string
-      msg?: string
-    }
-
-    if (!response.ok || data.code !== 0) {
-      throw apiResponseError('checkCaptcha', response, data, '校验短信验证码请求失败')
-    }
-  }
-
   async loginWithCaptcha(phone: string, captcha: string, deviceId: string): Promise<LoginWithCaptchaResponse> {
     const body = signedLaohuBody({
-      deviceType: 'LGE-AN10',
-      idfa: '',
-      sign: '',
-      adm: '',
-      type: '16',
-      deviceId,
-      version: '1',
-      deviceName: 'LGE-AN10',
-      mac: '',
-      t: String(Date.now()),
+      ...laohuIosBaseParams(deviceId, {}, String(Date.now())),
       areaCodeId: '1',
-      captcha: aesBase64Encode(captcha),
-      appId: '10550',
-      deviceSys: '12',
-      cellphone: aesBase64Encode(phone),
-      deviceModel: 'LGE-AN10',
-      sdkVersion: '4.129.0',
-      bid: 'com.pwrd.htassistant',
-      channelId: '1',
-    })
+      captcha: aesBase64Encode(captcha, LAOHU_IOS_SECRET),
+      cellphone: aesBase64Encode(phone, LAOHU_IOS_SECRET),
+      deviceModel: 'iPhone',
+      deviceName: 'iPhone',
+      deviceSys: '26.5',
+      deviceType: 'iPhone17,4',
+      idfa: '00000000-0000-0000-0000-000000000000',
+      type: '18',
+    }, LAOHU_IOS_SECRET)
 
     const response = await this.fetchImpl(`${LAOHU_BASE_URL}/openApi/sms/new/login`, {
       method: 'POST',
       headers: {
-        platform: 'android',
         'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent': LAOHU_IOS_USER_AGENT,
       },
       body,
     })
@@ -225,28 +170,14 @@ export class TaygedoApi {
     const openudid = device.openudid ?? stableUuid(`${deviceId}:openudid`)
     const vendorid = device.vendorid ?? stableUuid(`${deviceId}:vendorid`)
     const body = signedLaohuBody({
-      adid: deviceId,
-      adm: '',
-      appId: LAOHU_IOS_APP_ID,
-      bid: 'com.pwrd.htassistant',
-      channelId: LAOHU_IOS_CHANNEL_ID,
-      deviceId,
+      ...laohuIosBaseParams(deviceId, { openudid, vendorid }, String(Date.now())),
       deviceModel: 'iPhone',
       deviceName: 'iPhone',
-      deviceSys: '26.1',
-      deviceType: 'iPhone17,2',
-      iOSAppOnMac: '0',
+      deviceSys: '26.5',
+      deviceType: 'iPhone17,4',
       idfa: '00000000-0000-0000-0000-000000000000',
-      idfv: vendorid,
-      mac: deviceId,
-      openudid,
-      osType: '1',
       password: aesBase64Encode(password, LAOHU_IOS_SECRET),
-      sdkVersion: LAOHU_IOS_SDK_VERSION,
-      t: String(Date.now()),
       username: aesBase64Encode(phone, LAOHU_IOS_SECRET),
-      vendorid,
-      version: '1.2.2',
     }, LAOHU_IOS_SECRET)
 
     const response = await this.fetchImpl(`${LAOHU_BASE_URL}/openApi/secureLogin`, {
@@ -788,6 +719,32 @@ function aesBase64Encode(value: string, secret = LAOHU_SECRET): string {
   const cipher = createCipheriv('aes-128-ecb', key, Buffer.alloc(0))
   cipher.setAutoPadding(true)
   return Buffer.concat([cipher.update(value, 'utf8'), cipher.final()]).toString('base64')
+}
+
+function laohuIosBaseParams(
+  deviceId: string,
+  device: Partial<Pick<DeviceIdentity, 'openudid' | 'vendorid'>>,
+  timestamp: string,
+): Record<string, string> {
+  const openudid = device.openudid ?? stableUuid(`${deviceId}:openudid`)
+  const vendorid = device.vendorid ?? stableUuid(`${deviceId}:vendorid`)
+  return {
+    adid: deviceId,
+    adm: '',
+    appId: LAOHU_IOS_APP_ID,
+    bid: 'com.pwrd.htassistant',
+    channelId: LAOHU_IOS_CHANNEL_ID,
+    deviceId,
+    iOSAppOnMac: '0',
+    idfv: vendorid,
+    mac: deviceId,
+    openudid,
+    osType: '1',
+    sdkVersion: LAOHU_IOS_SDK_VERSION,
+    t: timestamp,
+    vendorid,
+    version: LAOHU_IOS_VERSION,
+  }
 }
 
 function stableUuid(seed: string): string {

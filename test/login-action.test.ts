@@ -79,7 +79,7 @@ describe('runLoginAction', () => {
         api,
       })
 
-      expect(api.checkCaptcha).toHaveBeenCalledWith('13800138000', '123456', 'device-from-secret')
+      expect(api.checkCaptcha).not.toHaveBeenCalled()
       expect(api.loginWithCaptcha).toHaveBeenCalledWith('13800138000', '123456', 'device-from-secret')
       expect(api.userCenterLogin).toHaveBeenCalledWith('laohu-token', 'laohu-user', 'device-from-secret')
       expect(JSON.parse(await readFile(accountsPath, 'utf8'))).toEqual([

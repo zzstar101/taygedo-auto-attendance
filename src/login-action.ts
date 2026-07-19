@@ -9,7 +9,7 @@ import { shanghaiDateTime } from './utils/time.js'
 
 export interface LoginActionDependencies {
   env?: Record<string, string | undefined>
-  api?: Pick<TaygedoApi, 'sendCaptcha' | 'checkCaptcha' | 'loginWithCaptcha' | 'userCenterLogin' | 'getBindRole'>
+  api?: Pick<TaygedoApi, 'sendCaptcha' | 'loginWithCaptcha' | 'userCenterLogin' | 'getBindRole'>
     & Partial<Pick<TaygedoApi, 'loginWithPassword'>>
   generateDeviceId?: () => string
   generateDeviceIdentity?: () => DeviceIdentity
@@ -56,7 +56,6 @@ export async function runLoginAction(deps: LoginActionDependencies = {}): Promis
   }
   else {
     const captcha = requireEnv(env, 'TAYGEDO_LOGIN_CAPTCHA')
-    await api.checkCaptcha(phone, captcha, device.deviceId)
     loginResult = await api.loginWithCaptcha(phone, captcha, device.deviceId)
   }
   const userCenter = await api.userCenterLogin(loginResult.token, loginResult.userId, device.deviceId)

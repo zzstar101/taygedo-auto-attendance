@@ -288,7 +288,6 @@ describe('TaygedoApi', () => {
   it('sends captcha and exchanges login credentials through the laohu and usercenter endpoints', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({ code: 0, message: 'ok' }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ code: 0, message: 'ok' }), { status: 200 }))
       .mockResolvedValueOnce(
         new Response(JSON.stringify({ code: 0, message: 'ok', result: { token: 'laohu-token', userId: 'user-1' } }), { status: 200 }),
       )
@@ -298,7 +297,6 @@ describe('TaygedoApi', () => {
     const api = new TaygedoApi({ fetch: fetchMock })
 
     await api.sendCaptcha('13800138000', 'device-1')
-    await expect(api.checkCaptcha('13800138000', '123456', 'device-1')).resolves.toBeUndefined()
     expect(await api.loginWithCaptcha('13800138000', '123456', 'device-1')).toEqual({
       token: 'laohu-token',
       userId: 'user-1',
@@ -318,20 +316,13 @@ describe('TaygedoApi', () => {
     )
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
-      'https://user.laohu.com/m/newApi/checkPhoneCaptchaWithOutLogin',
-      expect.objectContaining({
-        method: 'POST',
-      }),
-    )
-    expect(fetchMock).toHaveBeenNthCalledWith(
-      3,
       'https://user.laohu.com/openApi/sms/new/login',
       expect.objectContaining({
         method: 'POST',
       }),
     )
     expect(fetchMock).toHaveBeenNthCalledWith(
-      4,
+      3,
       'https://bbs-api.tajiduo.com/usercenter/api/login',
       expect.objectContaining({
         method: 'POST',
@@ -346,7 +337,19 @@ describe('TaygedoApi', () => {
         }),
       }),
     )
-    expect(fetchMock.mock.calls[3]?.[1]?.headers).not.toHaveProperty('uid')
+    expect(fetchMock.mock.calls[2]?.[1]?.headers).not.toHaveProperty('uid')
+
+    const sendBody = new URLSearchParams(String(fetchMock.mock.calls[0]?.[1]?.body))
+    const loginBody = new URLSearchParams(String(fetchMock.mock.calls[1]?.[1]?.body))
+    for (const body of [sendBody, loginBody]) {
+      expect(body.get('appId')).toBe('10551')
+      expect(body.get('channelId')).toBe('2')
+      expect(body.get('deviceId')).toBe('device-1')
+      expect(body.get('openudid')).toBeTruthy()
+      expect(body.get('vendorid')).toBeTruthy()
+    }
+    expect(sendBody.get('type')).toBe('18')
+    expect(loginBody.get('type')).toBe('18')
   })
 
   it('logs in with a password through the laohu secureLogin endpoint', async () => {
@@ -369,7 +372,7 @@ describe('TaygedoApi', () => {
         method: 'POST',
         headers: expect.objectContaining({
           'Content-Type': 'application/x-www-form-urlencoded',
-          'User-Agent': expect.stringContaining('HTAssistant/'),
+          'User-Agent': 'okhttp/4.12.0',
         }),
         body: expect.any(String),
       }),
@@ -381,6 +384,7 @@ describe('TaygedoApi', () => {
     expect(body).toContain('openudid=11111111-1111-4111-8111-111111111111')
     expect(body).toContain('vendorid=22222222-2222-4222-8222-222222222222')
     expect(body).toContain('appId=10551')
+    expect(body).toContain('version=1.2.4')
     expect(body).not.toContain('13800138000')
     expect(body).not.toContain('secret-password')
   })
