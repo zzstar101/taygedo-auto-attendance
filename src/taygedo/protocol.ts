@@ -12,6 +12,7 @@ const NONCE_ALPHABET = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123
 export interface MakeDsOptions {
   timestamp?: number
   nonce?: string
+  appVersion?: string
 }
 
 export interface ProtocolRequest {
@@ -44,8 +45,9 @@ export interface H5RequestOptions {
 export function makeDs(options: MakeDsOptions = {}): string {
   const timestamp = options.timestamp ?? Math.floor(Date.now() / 1000)
   const nonce = options.nonce ?? makeNonce()
+  const appVersion = options.appVersion ?? TAYGEDO_APP_VER
   const signature = createHash('md5')
-    .update(`${timestamp}${nonce}${TAYGEDO_APP_VER}${TAYGEDO_DS_SECRET}`, 'utf8')
+    .update(`${timestamp}${nonce}${appVersion}${TAYGEDO_DS_SECRET}`, 'utf8')
     .digest('hex')
   return `${timestamp},${nonce},${signature}`
 }

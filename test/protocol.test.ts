@@ -4,6 +4,7 @@ import { buildH5Request, buildNativeRequest, makeDs, nonceIndexFromByte } from '
 describe('taygedo protocol helpers', () => {
   it('builds a deterministic ds signature', () => {
     expect(makeDs({ timestamp: 1770000000, nonce: 'AbCd1234' })).toBe('1770000000,AbCd1234,075ed8cda8835e64bc513485e7f20b27')
+    expect(makeDs({ timestamp: 1710000000, nonce: 'ABCDEFGH', appVersion: '1.2.2' })).toBe('1710000000,ABCDEFGH,6cf4e2edb3dc484539a2b8d90080c2db')
   })
 
   it('builds native requests with ds and device headers', () => {

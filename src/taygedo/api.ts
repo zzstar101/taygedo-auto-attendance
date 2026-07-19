@@ -1,5 +1,5 @@
 import { createCipheriv, createHash } from 'node:crypto'
-import { buildH5Request, buildNativeRequest, makeDs, TAYGEDO_APP_VER, TAYGEDO_BASE_URL } from './protocol.js'
+import { buildH5Request, buildNativeRequest, makeDs, TAYGEDO_BASE_URL } from './protocol.js'
 import type { DeviceIdentity } from './device.js'
 
 const LAOHU_BASE_URL = 'https://user.laohu.com'
@@ -210,33 +210,11 @@ export class TaygedoApi {
   }
 
   async userCenterLogin(token: string, userId: string, deviceId: string): Promise<UserCenterLoginResponse> {
-    const response = await this.fetchImpl(`${TAYGEDO_BASE_URL}/usercenter/api/login`, {
-      method: 'POST',
-      headers: {
-        authorization: '',
-        appversion: TAYGEDO_APP_VER,
-        platform: 'ios',
-        deviceid: deviceId,
-        ds: makeDs(),
-        'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
-        'User-Agent': 'okhttp/4.12.0',
-      },
-      body: formEncode({
-        token,
-        userIdentity: userId,
-        appId: LAOHU_IOS_APP_ID,
-      }),
-    })
-
-    const data = await readJson(response, 'userCenterLogin') as {
-      code?: number
-      msg?: string
-      data?: {
-        accessToken?: string
-        refreshToken?: string
-        uid?: string | number
-      }
+    let attempt = await requestUserCenterLogin(this.fetchImpl, token, userId, deviceId)
+    if (isGenericUserCenterError(attempt.data) && userId !== 'HT') {
+      attempt = await requestUserCenterLogin(this.fetchImpl, token, 'HT', deviceId)
     }
+    const { response, data } = attempt
 
     if (!response.ok || data.code !== 0 || !data.data?.accessToken || !data.data.refreshToken || data.data.uid === undefined) {
       throw apiResponseError('userCenterLogin', response, data, '塔吉多用户中心登录请求失败')
@@ -683,6 +661,51 @@ export class TaygedoApi {
       ...(remained === undefined ? {} : { remained }),
     }
   }
+}
+
+interface UserCenterLoginPayload {
+  code?: number
+  msg?: string
+  message?: string
+  data?: {
+    accessToken?: string
+    refreshToken?: string
+    uid?: string | number
+  }
+}
+
+async function requestUserCenterLogin(
+  fetchImpl: typeof fetch,
+  token: string,
+  userIdentity: string,
+  deviceId: string,
+): Promise<{ response: Response, data: UserCenterLoginPayload }> {
+  const response = await fetchImpl(`${TAYGEDO_BASE_URL}/usercenter/api/login`, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json, text/plain, */*',
+      Authorization: '',
+      appversion: '1.2.2',
+      platform: 'ios',
+      uid: '0',
+      deviceid: deviceId,
+      ds: makeDs({ appVersion: '1.2.2' }),
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'User-Agent': 'HTAssistant/106 CFNetwork/3860.200.71 Darwin/25.1.0',
+    },
+    body: formEncode({
+      token,
+      userIdentity,
+      appId: LAOHU_IOS_APP_ID,
+    }),
+  })
+  const data = await readJson(response, 'userCenterLogin') as UserCenterLoginPayload
+  return { response, data }
+}
+
+function isGenericUserCenterError(data: UserCenterLoginPayload): boolean {
+  const message = (data.message ?? data.msg)?.trim()
+  return data.code === 1 && message === '系统错误'
 }
 
 function signedLaohuBody(data: Record<string, string>, secret = LAOHU_SECRET): string {

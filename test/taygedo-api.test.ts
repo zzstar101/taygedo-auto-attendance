@@ -328,16 +328,17 @@ describe('TaygedoApi', () => {
         method: 'POST',
         headers: expect.objectContaining({
           deviceid: 'device-1',
-          appversion: '1.2.4',
+          appversion: '1.2.2',
           platform: 'ios',
           ds: expect.any(String),
-          authorization: '',
-          'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
-          'User-Agent': 'okhttp/4.12.0',
+          uid: '0',
+          Authorization: '',
+          Accept: 'application/json, text/plain, */*',
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'User-Agent': 'HTAssistant/106 CFNetwork/3860.200.71 Darwin/25.1.0',
         }),
       }),
     )
-    expect(fetchMock.mock.calls[2]?.[1]?.headers).not.toHaveProperty('uid')
 
     const sendBody = new URLSearchParams(String(fetchMock.mock.calls[0]?.[1]?.body))
     const loginBody = new URLSearchParams(String(fetchMock.mock.calls[1]?.[1]?.body))
@@ -409,6 +410,25 @@ describe('TaygedoApi', () => {
     await expect(api.userCenterLogin('laohu-token', 'user-1', 'device-1')).rejects.toThrow(
       'userCenterLogin：系统错误（HTTP 200，code=22）',
     )
+  })
+
+  it('retries the captured legacy user identity after a generic user center error', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ code: 1, msg: '系统错误' }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        code: 0,
+        msg: 'ok',
+        data: { accessToken: 'access-token', refreshToken: 'refresh-token', uid: 'uid-1' },
+      }), { status: 200 }))
+    const api = new TaygedoApi({ fetch: fetchMock })
+
+    await expect(api.userCenterLogin('laohu-token', 'user-1', 'device-1')).resolves.toEqual({
+      accessToken: 'access-token',
+      refreshToken: 'refresh-token',
+      uid: 'uid-1',
+    })
+    expect(String(fetchMock.mock.calls[0]?.[1]?.body)).toContain('userIdentity=user-1')
+    expect(String(fetchMock.mock.calls[1]?.[1]?.body)).toContain('userIdentity=HT')
   })
 
   it('claims cloud yihuan duration through the laohu cloud endpoint', async () => {
