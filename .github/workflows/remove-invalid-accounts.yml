@@ -1,0 +1,33 @@
+name: Remove invalid Taygedo accounts
+
+on:
+  workflow_dispatch:
+
+jobs:
+  remove-invalid-accounts:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Remove confirmed invalid accounts
+        env:
+          TAYGEDO_ACCOUNTS: ${{ secrets.TAYGEDO_ACCOUNTS }}
+          GH_TOKEN: ${{ secrets.GH_SECRET_UPDATE_TOKEN }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { writeFile } from 'node:fs/promises'
+
+          const idsToRemove = new Set(['1', '2'])
+          const accounts = JSON.parse(process.env.TAYGEDO_ACCOUNTS ?? '')
+          if (!Array.isArray(accounts)) throw new Error('TAYGEDO_ACCOUNTS must be an array')
+
+          const removed = accounts.filter(account => idsToRemove.has(account?.id))
+          if (removed.length !== idsToRemove.size || removed.some(account => typeof account?.id !== 'string')) {
+            throw new Error('Expected account ids 1 and 2 were not both present exactly once')
+          }
+
+          const remaining = accounts.filter(account => !idsToRemove.has(account?.id))
+          if (remaining.length !== 3) throw new Error(`Expected 3 remaining accounts, found ${remaining.length}`)
+
+          await writeFile('remaining-accounts.json', `${JSON.stringify(remaining, null, 2)}\n`, 'utf8')
+          console.log('Removed account ids: 1, 2; remaining accounts: 3')
+          NODE
+          gh secret set TAYGEDO_ACCOUNTS < remaining-accounts.json
