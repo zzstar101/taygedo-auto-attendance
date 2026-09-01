@@ -30,4 +30,4 @@ jobs:
           await writeFile('remaining-accounts.json', `${JSON.stringify(remaining, null, 2)}\n`, 'utf8')
           console.log('Removed account ids: 1, 2; remaining accounts: 3')
           NODE
-          gh secret set TAYGEDO_ACCOUNTS < remaining-accounts.json
+          gh secret set TAYGEDO_ACCOUNTS --repo zzstar101/taygedo-auto-attendance < remaining-accounts.json
