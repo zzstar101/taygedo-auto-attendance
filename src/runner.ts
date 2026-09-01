@@ -284,7 +284,7 @@ async function refreshOrRebuildSession(
   }
 
   try {
-    const refreshed = await api.refreshToken(account.refreshToken, account.deviceId)
+    const refreshed = await api.refreshToken(account.refreshToken, account.deviceId, account.uid)
     const updatedAccount = withSession(account, {
       accessToken: refreshed.accessToken,
       refreshToken: refreshed.refreshToken,

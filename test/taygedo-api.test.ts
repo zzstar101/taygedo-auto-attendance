@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { TaygedoApi } from '../src/taygedo/api.js'
 
 describe('TaygedoApi', () => {
-  it('refreshes tokens using the stored refreshToken and device id', async () => {
+  it('refreshes tokens using the official 1.2.5 session profile', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(
         JSON.stringify({
@@ -18,7 +18,7 @@ describe('TaygedoApi', () => {
     )
     const api = new TaygedoApi({ fetch: fetchMock })
 
-    const result = await api.refreshToken('old-refresh', 'device-1')
+    const result = await api.refreshToken('old-refresh', 'device-1', 'uid-1')
 
     expect(result).toEqual({
       accessToken: 'new-access',
@@ -29,19 +29,24 @@ describe('TaygedoApi', () => {
       expect.objectContaining({
         method: 'POST',
         headers: expect.objectContaining({
-          authorization: 'old-refresh',
-          deviceid: 'device-1',
-          appversion: '1.1.0',
+          Authorization: 'old-refresh',
+          deviceId: 'device-1',
+          uid: 'uid-1',
+          appVersion: '1.2.5',
+          platform: 'android',
+          'debug-uid': '3',
+          ds: expect.any(String),
         }),
       }),
     )
+    expect(fetchMock.mock.calls[0]?.[1]).not.toHaveProperty('body')
   })
 
   it('reports which endpoint returned invalid json', async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response('', { status: 200 }))
     const api = new TaygedoApi({ fetch: fetchMock })
 
-    await expect(api.refreshToken('old-refresh', 'device-1')).rejects.toThrow(
+    await expect(api.refreshToken('old-refresh', 'device-1', 'uid-1')).rejects.toThrow(
       'refreshToken 返回了无效 JSON（HTTP 200，响应为空）',
     )
   })
@@ -116,7 +121,7 @@ describe('TaygedoApi', () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response('', { status: 402 }))
     const api = new TaygedoApi({ fetch: fetchMock })
 
-    await expect(api.refreshToken('old-refresh', 'device-1')).rejects.toThrow(
+    await expect(api.refreshToken('old-refresh', 'device-1', 'uid-1')).rejects.toThrow(
       'REFRESH_REJECTED_402: refreshToken 已失效，请重新登录',
     )
   })
@@ -148,10 +153,14 @@ describe('TaygedoApi', () => {
       expect.objectContaining({
         method: 'POST',
         headers: expect.objectContaining({
-          authorization: 'access-token',
+          Authorization: 'access-token',
           uid: 'uid-1',
           deviceid: 'device-1',
+          appversion: '1.2.5',
+          platform: 'android',
+          ds: expect.any(String),
         }),
+        body: 'communityId=1',
       }),
     )
     expect(fetchMock).toHaveBeenNthCalledWith(
@@ -162,6 +171,36 @@ describe('TaygedoApi', () => {
         body: 'roleId=role-1&gameId=1256',
       }),
     )
+  })
+
+  it('gets game roles through the native 1.2.5 request profile', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({
+        code: 0,
+        msg: 'ok',
+        data: { roles: [{ roleId: 123, roleName: '角色一' }] },
+      }), { status: 200 }),
+    )
+    const api = new TaygedoApi({ fetch: fetchMock })
+
+    await expect(api.getGameRoles('access-token', 'uid-1', 'device-1', '1256')).resolves.toEqual({
+      roles: [{ roleId: '123', roleName: '角色一' }],
+    })
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://bbs-api.tajiduo.com/usercenter/api/v2/getGameRoles?gameId=1256',
+      expect.objectContaining({
+        method: 'GET',
+        headers: expect.objectContaining({
+          Authorization: 'access-token',
+          uid: 'uid-1',
+          deviceid: 'device-1',
+          appversion: '1.2.5',
+          platform: 'android',
+          ds: expect.any(String),
+        }),
+      }),
+    )
+    expect(fetchMock.mock.calls[0]?.[1]).not.toHaveProperty('body')
   })
 
   it('reads bound game roles from record cards', async () => {
@@ -563,7 +602,7 @@ describe('TaygedoApi', () => {
     }), { status: 200 }))
     const api = new TaygedoApi({ fetch: fetchMock, userCenterFetch })
 
-    await expect(api.refreshToken('old-refresh', 'device-1')).resolves.toEqual({
+    await expect(api.refreshToken('old-refresh', 'device-1', 'uid-1')).resolves.toEqual({
       accessToken: 'new-access',
       refreshToken: 'new-refresh',
       uid: '1',

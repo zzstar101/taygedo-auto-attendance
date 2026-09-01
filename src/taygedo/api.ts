@@ -1,5 +1,5 @@
 import { createCipheriv, createHash } from 'node:crypto'
-import { buildH5Request, buildNativeRequest, makeDs, TAYGEDO_APP_VER, TAYGEDO_BASE_URL } from './protocol.js'
+import { buildH5Request, buildNativeRequest, buildUserCenterSessionRequest, TAYGEDO_BASE_URL } from './protocol.js'
 import type { DeviceIdentity } from './device.js'
 
 const LAOHU_BASE_URL = 'https://user.laohu.com'
@@ -283,17 +283,14 @@ export class TaygedoApi {
     }
   }
 
-  async refreshToken(refreshToken: string, deviceId: string): Promise<RefreshTokenResponse> {
-    const response = await this.userCenterFetchImpl(`${TAYGEDO_BASE_URL}/usercenter/api/refreshToken`, {
-      method: 'POST',
-      headers: {
-        authorization: refreshToken,
-        deviceid: deviceId,
-        appversion: '1.1.0',
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'User-Agent': 'okhttp/4.12.0',
-      },
+  async refreshToken(refreshToken: string, deviceId: string, uid: string): Promise<RefreshTokenResponse> {
+    const request = buildUserCenterSessionRequest({
+      authorization: refreshToken,
+      uid,
+      deviceId,
+      path: '/usercenter/api/refreshToken',
     })
+    const response = await this.userCenterFetchImpl(request.url, request.init)
 
     if (response.status === 402) {
       throw new Error('REFRESH_REJECTED_402: refreshToken 已失效，请重新登录')
@@ -342,17 +339,15 @@ export class TaygedoApi {
   }
 
   async getGameRoles(accessToken: string, uid: string, deviceId: string, gameId = '1256'): Promise<GameRolesResponse> {
-    const response = await this.fetchImpl(`${TAYGEDO_BASE_URL}/usercenter/api/v2/getGameRoles?gameId=${encodeURIComponent(gameId)}`, {
+    const request = buildNativeRequest({
+      accessToken,
+      uid,
+      deviceId,
       method: 'GET',
-      headers: {
-        platform: 'android',
-        authorization: accessToken,
-        uid,
-        deviceid: deviceId,
-        appversion: '1.1.0',
-        'User-Agent': 'okhttp/4.12.0',
-      },
+      path: '/usercenter/api/v2/getGameRoles',
+      query: { gameId },
     })
+    const response = await this.fetchImpl(request.url, request.init)
 
     const data = await readJson(response, 'getGameRoles') as {
       code?: number
@@ -403,18 +398,15 @@ export class TaygedoApi {
   }
 
   async appSignin(accessToken: string, uid: string, deviceId: string): Promise<{ exp: number, goldCoin: number }> {
-    const response = await this.fetchImpl(`${TAYGEDO_BASE_URL}/apihub/api/signin`, {
+    const request = buildNativeRequest({
+      accessToken,
+      uid,
+      deviceId,
       method: 'POST',
-      headers: {
-        authorization: accessToken,
-        uid,
-        deviceid: deviceId,
-        appversion: '1.1.0',
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'User-Agent': 'okhttp/4.12.0',
-      },
-      body: 'communityId=1',
+      path: '/apihub/api/signin',
+      body: { communityId: 1 },
     })
+    const response = await this.fetchImpl(request.url, request.init)
 
     const data = await readJson(response, 'appSignin') as {
       code?: number
@@ -739,37 +731,36 @@ async function requestUserCenterLogin(
   deviceId: string,
   profile: UserCenterLoginProfile,
 ): Promise<{ response: Response, data: UserCenterLoginPayload }> {
-  const headers: Record<string, string> = profile === 'official'
-    ? {
-        Accept: 'application/json, text/plain, */*',
-        Authorization: '',
-        appVersion: TAYGEDO_APP_VER,
-        platform: 'android',
-        uid: '0',
-        'debug-uid': '3',
-        deviceId,
-        ds: makeDs(),
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'User-Agent': 'okhttp/4.12.0',
-      }
-    : {
+  const body = {
+    token,
+    userIdentity,
+    appId: TAYGEDO_LOGIN_APP_ID,
+  }
+  const request = profile === 'official'
+    ? buildUserCenterSessionRequest({
         authorization: '',
-        appversion: TAYGEDO_COMPAT_APP_VERSION,
-        platform: 'android',
-        uid: TAYGEDO_COMPAT_UID,
-        deviceid: deviceId,
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'User-Agent': 'okhttp/4.12.0',
+        uid: '0',
+        deviceId,
+        path: '/usercenter/api/login',
+        body,
+      })
+    : {
+        url: `${TAYGEDO_BASE_URL}/usercenter/api/login`,
+        init: {
+          method: 'POST',
+          headers: {
+            authorization: '',
+            appversion: TAYGEDO_COMPAT_APP_VERSION,
+            platform: 'android',
+            uid: TAYGEDO_COMPAT_UID,
+            deviceid: deviceId,
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'User-Agent': 'okhttp/4.12.0',
+          },
+          body: formEncode(body),
+        },
       }
-  const response = await fetchImpl(`${TAYGEDO_BASE_URL}/usercenter/api/login`, {
-    method: 'POST',
-    headers,
-    body: formEncode({
-      token,
-      userIdentity,
-      appId: TAYGEDO_LOGIN_APP_ID,
-    }),
-  })
+  const response = await fetchImpl(request.url, request.init)
   const data = await readJson(response, 'userCenterLogin') as UserCenterLoginPayload
   return { response, data }
 }

@@ -34,6 +34,25 @@ export interface NativeRequestOptions {
   nonce?: () => string
 }
 
+interface UserCenterSessionRequestBaseOptions {
+  authorization: string
+  uid: string
+  deviceId: string
+  now?: () => Date
+  nonce?: () => string
+}
+
+export type UserCenterSessionRequestOptions = UserCenterSessionRequestBaseOptions & (
+  | {
+      path: '/usercenter/api/login'
+      body: Record<string, string | number | undefined>
+    }
+  | {
+      path: '/usercenter/api/refreshToken'
+      body?: never
+    }
+)
+
 export interface H5RequestOptions {
   accessToken: string
   method: 'GET' | 'POST'
@@ -77,6 +96,32 @@ export function buildNativeRequest(options: NativeRequestOptions): ProtocolReque
     init: {
       method: options.method,
       headers,
+      ...(body ? { body } : {}),
+    },
+  }
+}
+
+export function buildUserCenterSessionRequest(options: UserCenterSessionRequestOptions): ProtocolRequest {
+  const body = options.body ? formEncode(options.body) : undefined
+  return {
+    url: buildUrl(options.path),
+    init: {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json, text/plain, */*',
+        Authorization: options.authorization,
+        appVersion: TAYGEDO_APP_VER,
+        platform: 'android',
+        uid: options.uid,
+        'debug-uid': '3',
+        deviceId: options.deviceId,
+        ds: makeDs({
+          timestamp: Math.floor((options.now?.() ?? new Date()).getTime() / 1000),
+          nonce: options.nonce?.(),
+        }),
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent': NATIVE_USER_AGENT,
+      },
       ...(body ? { body } : {}),
     },
   }

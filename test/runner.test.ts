@@ -258,7 +258,7 @@ describe('runAttendance', () => {
       secretWriter,
     })
 
-    expect(api.refreshToken).toHaveBeenCalledWith('old-main', 'device-1')
+    expect(api.refreshToken).toHaveBeenCalledWith('old-main', 'device-1', '1')
     expect(result.updatedAccounts[0]).toEqual(expect.objectContaining({
       accessToken: 'new-access',
       refreshToken: 'new-refresh',
@@ -428,7 +428,7 @@ describe('runAttendance', () => {
     })
 
     expect(api.loginWithPassword).toHaveBeenCalledTimes(1)
-    expect(api.refreshToken).toHaveBeenCalledWith('old-main', 'device-1')
+    expect(api.refreshToken).toHaveBeenCalledWith('old-main', 'device-1', '1')
     expect(result.updatedAccounts[0]).toEqual(expect.objectContaining({
       accessToken: 'new-access',
       refreshToken: 'new-refresh',
@@ -904,7 +904,7 @@ describe('runAttendance', () => {
       now: shanghaiNoon,
     })
 
-    expect(api.refreshToken).toHaveBeenCalledWith('old-main', 'device-1')
+    expect(api.refreshToken).toHaveBeenCalledWith('old-main', 'device-1', '1')
     expect(result.forceRun).toBe(true)
     expect(result.skippedCount).toBe(0)
     expect(result.successCount).toBe(1)
