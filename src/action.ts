@@ -13,6 +13,7 @@ interface ActionOptions {
 export async function runAction(options: ActionOptions = {}): Promise<void> {
   const env = options.env ?? process.env
   const config = loadRuntimeConfig(env)
+  let accountsWritten = false
   console.log(`运行配置：金币任务=${config.coinTasks ? '开启' : '关闭'}，云异环=${config.cloudDuration ? '开启' : '关闭'}，分享平台=${config.sharePlatform}，强制重跑=${config.forceRun ? '是' : '否'}，账号并发=${config.accountConcurrency}`)
   const service = new AttendanceService({
     accountStore: {
@@ -22,7 +23,10 @@ export async function runAction(options: ActionOptions = {}): Promise<void> {
         }
         return config.accountsSecret
       },
-      writeAccounts: payload => new GitHubFileAccountStore(config.updatedAccountsPath).writeAccounts(payload),
+      writeAccounts: async (payload) => {
+        await new GitHubFileAccountStore(config.updatedAccountsPath).writeAccounts(payload)
+        accountsWritten = true
+      },
     },
     stateStore: new MemoryStateStore(config.statePrefix),
     api: options.api ?? new TaygedoApi(),
@@ -36,9 +40,18 @@ export async function runAction(options: ActionOptions = {}): Promise<void> {
     cloudDuration: config.cloudDuration,
     sharePlatform: config.sharePlatform,
   })
-  await service.run()
+  const result = await service.run()
 
-  console.log(`已写入更新后的账号文件：${config.updatedAccountsPath}`)
+  if (accountsWritten) {
+    console.log(`已写入更新后的账号文件：${config.updatedAccountsPath}`)
+  }
+  else {
+    console.log(`账号凭据无变化，未生成更新文件：${config.updatedAccountsPath}`)
+  }
+
+  if (result.failedCount > 0) {
+    throw new Error(`签到存在失败账号：失败账号数：${result.failedCount}，总账号数：${result.accounts.length}`)
+  }
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

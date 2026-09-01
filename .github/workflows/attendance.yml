@@ -49,7 +49,7 @@ jobs:
         run: pnpm action
 
       - name: 更新账号 Secret
-        if: hashFiles('updated-accounts.json') != ''
+        if: always() && hashFiles('updated-accounts.json') != ''
         env:
           GH_TOKEN: ${{ secrets.GH_SECRET_UPDATE_TOKEN }}
         run: gh secret set TAYGEDO_ACCOUNTS < updated-accounts.json

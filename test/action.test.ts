@@ -14,10 +14,11 @@ describe('runAction', () => {
     gameSignin: vi.fn().mockResolvedValue(undefined),
   })
 
-  it('writes updated accounts json to the configured output path', async () => {
+  it('resolves, writes updated accounts, and logs the output path when all accounts succeed', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'taygedo-action-'))
     const outputPath = join(dir, 'updated-accounts.json')
     const api = createApi()
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
 
     try {
       await runAction({
@@ -49,8 +50,109 @@ describe('runAction', () => {
           roleName: '角色一',
         },
       ])
+      expect(log).toHaveBeenCalledWith(`已写入更新后的账号文件：${outputPath}`)
     }
     finally {
+      log.mockRestore()
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects without creating an output file or claiming it was written when all accounts fail', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'taygedo-action-failed-'))
+    const outputPath = join(dir, 'updated-accounts.json')
+    const api = {
+      ...createApi(),
+      refreshToken: vi.fn().mockRejectedValue(new Error('refresh failed')),
+    }
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    try {
+      await expect(runAction({
+        env: {
+          TAYGEDO_ACCOUNTS: JSON.stringify([
+            {
+              id: 'failed',
+              name: '失败账号',
+              uid: '2',
+              deviceId: 'device-2',
+              refreshToken: 'old-failed',
+            },
+          ]),
+          TAYGEDO_UPDATED_ACCOUNTS_PATH: outputPath,
+          TAYGEDO_MAX_RETRIES: '1',
+        },
+        api,
+      })).rejects.toThrow(/失败账号数：1，总账号数：1/)
+
+      await expect(readFile(outputPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+      expect(log).toHaveBeenCalledWith(`账号凭据无变化，未生成更新文件：${outputPath}`)
+      expect(log).not.toHaveBeenCalledWith(`已写入更新后的账号文件：${outputPath}`)
+    }
+    finally {
+      log.mockRestore()
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects after writing refreshed credentials while retaining failed accounts', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'taygedo-action-partial-'))
+    const outputPath = join(dir, 'updated-accounts.json')
+    const api = {
+      ...createApi(),
+      refreshToken: vi.fn().mockImplementation(async (refreshToken: string) => {
+        if (refreshToken === 'old-failed') {
+          throw new Error('refresh failed')
+        }
+        return { accessToken: 'access-success', refreshToken: 'new-success' }
+      }),
+    }
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    try {
+      await expect(runAction({
+        env: {
+          TAYGEDO_ACCOUNTS: JSON.stringify([
+            {
+              id: 'success',
+              name: '成功账号',
+              uid: '1',
+              deviceId: 'device-1',
+              refreshToken: 'old-success',
+            },
+            {
+              id: 'failed',
+              name: '失败账号',
+              uid: '2',
+              deviceId: 'device-2',
+              refreshToken: 'old-failed',
+            },
+          ]),
+          TAYGEDO_UPDATED_ACCOUNTS_PATH: outputPath,
+          TAYGEDO_MAX_RETRIES: '1',
+        },
+        api,
+      })).rejects.toThrow(/失败账号数：1，总账号数：2/)
+
+      const updatedAccounts = JSON.parse(await readFile(outputPath, 'utf8'))
+      expect(updatedAccounts).toEqual([
+        expect.objectContaining({
+          id: 'success',
+          accessToken: 'access-success',
+          refreshToken: 'new-success',
+        }),
+        {
+          id: 'failed',
+          name: '失败账号',
+          uid: '2',
+          deviceId: 'device-2',
+          refreshToken: 'old-failed',
+        },
+      ])
+      expect(log).toHaveBeenCalledWith(`已写入更新后的账号文件：${outputPath}`)
+    }
+    finally {
+      log.mockRestore()
       await rm(dir, { recursive: true, force: true })
     }
   })
