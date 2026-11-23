@@ -1,5 +1,7 @@
 # 塔吉多自动签到
 
+[![Listed in Awesome NTE](https://raw.githubusercontent.com/zzstar101/awesome-nte/main/assets/badge-listed.svg)](https://github.com/zzstar101/awesome-nte)
+
 使用 TypeScript 实现的塔吉多自动签到工具，支持多账号、自动重登、通知推送和多种自托管部署方式。
 
 支持平台：GitHub Actions、Cloudflare Workers、腾讯云 / 阿里云云函数、Docker、本地 CLI。默认尝试签到全部已知游戏 `1256`、`1257`、`1289`。
