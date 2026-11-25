@@ -1015,6 +1015,43 @@ describe('runAttendance', () => {
     expect(error).toContain('风控')
   })
 
+  it('names which password source was used when the login is rejected', async () => {
+    const api = {
+      refreshToken: vi.fn(),
+      loginWithPassword: vi.fn().mockRejectedValue(
+        new Error('loginWithPassword：用户名或密码错误（HTTP 200，code=1）'),
+      ),
+      cloudQueryWhetherSetPassword: vi.fn().mockResolvedValue({ havePwd: true }),
+      getGameRoles: vi.fn().mockResolvedValue({ roles: [] }),
+      appSignin: vi.fn().mockResolvedValue({ exp: 10, goldCoin: 20 }),
+      getSigninState: vi.fn(),
+      getSigninRewards: vi.fn(),
+      gameSignin: vi.fn(),
+      cloudGetUserInfo: vi.fn().mockRejectedValue(
+        new Error('cloudGetUserInfo：登陆失效，需要重新登陆（HTTP 200，code=10004）'),
+      ),
+    }
+    const accountsSecret = JSON.stringify([
+      {
+        id: 'main',
+        name: '主账号',
+        uid: '1',
+        deviceId: 'device-1',
+        accessToken: 'stored-access',
+        refreshToken: 'old-main',
+        laohuToken: 'stale-laohu-token',
+        laohuUserId: 'laohu-user',
+        phone: '13800138000',
+      },
+    ])
+
+    const byId = await runAttendance({ accountsSecret, api, accountPasswords: { main: 'pw' }, maxRetries: 1 })
+    expect(byId.accounts[0]?.cloudDuration?.error).toContain('TAYGEDO_PASSWORDS["main"]')
+
+    const byDefault = await runAttendance({ accountsSecret, api, accountPasswords: { default: 'pw' }, maxRetries: 1 })
+    expect(byDefault.accounts[0]?.cloudDuration?.error).toContain('TAYGEDO_PASSWORDS.default')
+  })
+
   it('keeps the original login error when the password state probe fails', async () => {
     const api = {
       refreshToken: vi.fn(),

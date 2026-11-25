@@ -510,10 +510,10 @@ async function refreshOrRebuildSession(
   accountPasswords: Record<string, string>,
   credentialKey?: string,
 ): Promise<{ account: TaygedoAccount, accessToken: string }> {
-  const password = resolveAccountPassword(account, accountPasswords, credentialKey)
-  if (account.phone && password && api.loginWithPassword && api.userCenterLogin) {
+  const resolved = resolveAccountPassword(account, accountPasswords, credentialKey)
+  if (account.phone && resolved && api.loginWithPassword && api.userCenterLogin) {
     try {
-      const login = await api.loginWithPassword(account.phone, password, account.deviceId, {
+      const login = await api.loginWithPassword(account.phone, resolved.password, account.deviceId, {
         openudid: account.openudid,
         vendorid: account.vendorid,
       })
@@ -565,17 +565,30 @@ async function refreshOrRebuildSession(
   }
 }
 
+interface ResolvedPassword {
+  password: string
+  /** 密码来源，只用于错误提示（不包含密码本身），多账号时能看出是不是用错了账号的密码。 */
+  source: string
+}
+
 function resolveAccountPassword(
   account: TaygedoAccount,
   accountPasswords: Record<string, string>,
   credentialKey?: string,
-): string | undefined {
-  const envPassword = accountPasswords[account.id] ?? accountPasswords[account.phone ?? ''] ?? accountPasswords.default
-  if (envPassword) {
-    return envPassword
+): ResolvedPassword | undefined {
+  const byId = accountPasswords[account.id]
+  if (byId) {
+    return { password: byId, source: `TAYGEDO_PASSWORDS["${account.id}"]` }
+  }
+  const byPhone = account.phone ? accountPasswords[account.phone] : undefined
+  if (byPhone) {
+    return { password: byPhone, source: 'TAYGEDO_PASSWORDS[手机号]' }
+  }
+  if (accountPasswords.default) {
+    return { password: accountPasswords.default, source: 'TAYGEDO_PASSWORDS.default（或 TAYGEDO_LOGIN_PASSWORD）' }
   }
   if (account.encryptedPassword && credentialKey) {
-    return decryptPassword(account.encryptedPassword, credentialKey)
+    return { password: decryptPassword(account.encryptedPassword, credentialKey), source: 'encryptedPassword' }
   }
   return undefined
 }
@@ -827,16 +840,17 @@ async function runCloudDuration(
     ...(updatedAccount ? { updatedAccount, shouldUpdateSecret: true } : {}),
   })
 
+  const resolved = resolveAccountPassword(account, accountPasswords, credentialKey)
+
   // 云异环只认老虎体系 token，refreshToken 续不了：token 过期（code=10004）时只能用
   // 手机号 + 密码重新登录。先复用塔吉多 App 的登录（laohuToken），被拒再退到云异环
   // 自己的 App 身份（cloudToken）——老虎各 App 的密码状态是独立的。
   const reloginLaohu = async (): Promise<LaohuCredentials | undefined> => {
     const phone = account.phone
-    const password = resolveAccountPassword(account, accountPasswords, credentialKey)
-    if (!phone || !password || !loginWithPassword) {
+    if (!phone || !resolved || !loginWithPassword) {
       return undefined
     }
-    const login = await loginWithPassword(phone, password, account.deviceId, {
+    const login = await loginWithPassword(phone, resolved.password, account.deviceId, {
       openudid: account.openudid,
       vendorid: account.vendorid,
     })
@@ -851,11 +865,10 @@ async function runCloudDuration(
 
   const reloginCloud = async (): Promise<LaohuCredentials | undefined> => {
     const phone = account.phone
-    const password = resolveAccountPassword(account, accountPasswords, credentialKey)
-    if (!phone || !password || !cloudLoginWithPassword) {
+    if (!phone || !resolved || !cloudLoginWithPassword) {
       return undefined
     }
-    const login = await cloudLoginWithPassword(phone, password, account.deviceId)
+    const login = await cloudLoginWithPassword(phone, resolved.password, account.deviceId)
     // 云异环 token 单独存：塔吉多登录态（laohuToken）还要给 userCenterLogin 用，
     // 两个 App 的 token 不能混。
     updatedAccount = {
@@ -898,7 +911,7 @@ async function runCloudDuration(
     else if (attempt.loginError) {
       return respond({
         status: 'failed',
-        error: await describeLaohuLoginFailure(api, account, attempt.loginError),
+        error: await describeLaohuLoginFailure(api, account, attempt.loginError, resolved?.source),
       })
     }
     else {
@@ -924,7 +937,7 @@ async function runCloudDuration(
     if (attempt.loginError) {
       return respond({
         status: 'failed',
-        error: await describeLaohuLoginFailure(api, account, attempt.loginError),
+        error: await describeLaohuLoginFailure(api, account, attempt.loginError, resolved?.source),
       })
     }
     if (!attempt.credentials) {
@@ -966,28 +979,31 @@ async function describeLaohuLoginFailure(
   api: AttendanceApi,
   account: TaygedoAccount,
   error: unknown,
+  passwordSource?: string,
 ): Promise<string> {
   const base = `老虎登录失败：${errorMessage(error)}`
   const reloginHint = '请重新执行一次登录流程（短信验证码）刷新 token'
+  // 多账号时最常见的原因是「拿 A 账号的密码去登 B」，把来源标出来能一眼看出来。
+  const sourceHint = passwordSource ? `（本次使用的是 ${passwordSource} 里的密码）` : ''
   const phone = account.phone
   if (!phone || !api.cloudQueryWhetherSetPassword) {
-    return `${base}；laohuToken 已过期，${reloginHint}`
+    return `${base}${sourceHint}；laohuToken 已过期，${reloginHint}`
   }
 
   try {
     const state = await api.cloudQueryWhetherSetPassword(phone, account.deviceId)
     if (state.havePwd === false) {
-      return `${base}；laohuToken 已过期，且该手机号在老虎平台没有设置密码，无法自动重新登录：${reloginHint}，或先在老虎平台设置密码并把密码配置到 TAYGEDO_PASSWORDS`
+      return `${base}${sourceHint}；laohuToken 已过期，且该手机号在老虎平台没有设置密码，无法自动重新登录：${reloginHint}，或先在老虎平台设置密码并把密码配置到 TAYGEDO_PASSWORDS`
     }
     if (state.havePwd === true) {
-      return `${base}；laohuToken 已过期，该账号有老虎密码但当前密码被拒绝（可能已修改，或本次登录触发风控）：请更新 TAYGEDO_PASSWORDS，或${reloginHint}`
+      return `${base}${sourceHint}；laohuToken 已过期，该账号有老虎密码但当前密码被拒绝（可能已修改，或本次登录触发风控）：请更新 TAYGEDO_PASSWORDS，或${reloginHint}`
     }
   }
   catch {
     // 诊断失败不影响原始错误信息
   }
 
-  return `${base}；laohuToken 已过期，${reloginHint}`
+  return `${base}${sourceHint}；laohuToken 已过期，${reloginHint}`
 }
 
 function toCloudDurationSummary(result: CloudDurationResponse): CloudDurationSummary {
