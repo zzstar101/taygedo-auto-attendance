@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
@@ -417,5 +417,165 @@ describe('StateStore implementations', () => {
     await store.set('last', { ok: true }, { ttlSeconds: 60 })
     await expect(store.get('last')).resolves.toEqual({ ok: true })
     expect(options[0]).toEqual({ ttl: 60 })
+  })
+})
+
+describe('AccountStore concurrency and file handling', () => {
+  const accountRecord = (id: string, token: string) => ({ id, name: id, uid: id, deviceId: `device-${id}`, refreshToken: token })
+
+  it('serializes concurrent updates so both tokens survive', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'taygedo-account-lock-'))
+    const path = join(dir, 'accounts.json')
+    await writeFile(path, JSON.stringify([accountRecord('a', 'old-a'), accountRecord('b', 'old-b')]), 'utf8')
+
+    // 两个实例（两个 store 对象）各自刷新一个账号：B 立刻拿到锁，A 在 build 里等待，
+    // 说明锁覆盖了「读 → 合并 → 写」全过程，A 必须读到 B 刚写好的内容。
+    const storeA = new FileAccountStore(path)
+    const storeB = new FileAccountStore(path)
+    const patchToken = (latest: string, id: string, token: string) => {
+      const list = JSON.parse(latest) as Array<Record<string, unknown>>
+      const target = list.find(item => item.id === id)
+      if (!target) {
+        throw new Error(`缺少账号 ${id}`)
+      }
+      target.refreshToken = token
+      return JSON.stringify(list)
+    }
+
+    try {
+      await Promise.all([
+        storeB.updateAccounts(latest => patchToken(latest, 'b', 'new-b')),
+        storeA.updateAccounts(async (latest) => {
+          await new Promise(resolve => setTimeout(resolve, 30))
+          return patchToken(latest, 'a', 'new-a')
+        }),
+      ])
+
+      const final = JSON.parse(await readFile(path, 'utf8')) as Array<Record<string, unknown>>
+      expect(final.map(item => item.refreshToken)).toEqual(['new-a', 'new-b'])
+      // 锁文件用完要清掉，不能留在账号文件旁边
+      expect(await readdir(dir)).toEqual(['accounts.json'])
+    }
+    finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('requires the caller to read the latest content inside the lock', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'taygedo-account-skip-'))
+    const path = join(dir, 'accounts.json')
+    await writeFile(path, JSON.stringify([accountRecord('a', 'old-a')]), 'utf8')
+    const store = new FileAccountStore(path)
+
+    try {
+      await store.updateAccounts(() => undefined)
+      expect(JSON.parse(await readFile(path, 'utf8'))).toEqual([accountRecord('a', 'old-a')])
+    }
+    finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it.skipIf(process.platform === 'win32')('updates the symlink target instead of replacing the link', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'taygedo-account-symlink-'))
+    const target = join(dir, 'shared-accounts.json')
+    const link = join(dir, 'accounts.json')
+    await writeFile(target, JSON.stringify([accountRecord('a', 'old-a')]), { encoding: 'utf8', mode: 0o600 })
+    await symlink(target, link)
+
+    const store = new FileAccountStore(link)
+
+    try {
+      await store.writeAccounts(JSON.stringify([accountRecord('a', 'new-a')]))
+
+      // 链接还是链接，共享目标里已经是新内容
+      expect((await lstat(link)).isSymbolicLink()).toBe(true)
+      expect(JSON.parse(await readFile(target, 'utf8'))).toEqual([accountRecord('a', 'new-a')])
+    }
+    finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it.skipIf(process.platform === 'win32')('tightens an already world-readable account file', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'taygedo-account-mode-'))
+    const path = join(dir, 'accounts.json')
+    await writeFile(path, '[]\n', 'utf8')
+    // 先真的放宽到 0644：直接 writeFile({mode}) 覆写已有文件不会改权限，测不出问题
+    await chmod(path, 0o644)
+
+    const store = new FileAccountStore(path)
+
+    try {
+      await store.writeAccounts(JSON.stringify([accountRecord('a', 'new-a')]))
+      expect((await stat(path)).mode & 0o777).toBe(0o600)
+    }
+    finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('FileStateStore legacy compatibility', () => {
+  it.skipIf(process.platform === 'win32')('reads legacy markers whose file name is near the length limit', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'taygedo-state-legacy-long-'))
+    const longId = 'a'.repeat(225)
+    const key = `attendance:${longId}:2026-11-25`
+    const legacyPath = join(dir, 'prod', `${key}.json`)
+    const store = new FileStateStore(dir, 'prod')
+
+    try {
+      await mkdir(join(dir, 'prod'), { recursive: true })
+      await writeFile(legacyPath, JSON.stringify({ status: 'success', accountId: longId, date: '2026-11-25' }), 'utf8')
+
+      // 旧版能写出来的名字（252 字节）不能因为长度预判就跳过，否则升级当天重复签到
+      await expect(store.get(key)).resolves.toEqual({
+        status: 'success',
+        accountId: longId,
+        date: '2026-11-25',
+      })
+    }
+    finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it.skipIf(process.platform === 'win32')('ignores a legacy marker that belongs to another account', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'taygedo-state-legacy-owner-'))
+    const store = new FileStateStore(dir, 'prod')
+
+    try {
+      await mkdir(join(dir, 'prod'), { recursive: true })
+      // 大小写不敏感卷上，key `main` 会命中旧版本为 `Main` 写的文件
+      await writeFile(
+        join(dir, 'prod', 'attendance:main:2026-11-25.json'),
+        JSON.stringify({ status: 'success', accountId: 'Main', date: '2026-11-25' }),
+        'utf8',
+      )
+
+      await expect(store.get('attendance:main:2026-11-25')).resolves.toBeUndefined()
+    }
+    finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it.skipIf(process.platform === 'win32')('keeps the permission bits of an existing state file', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'taygedo-state-mode-'))
+    const store = new FileStateStore(dir, 'prod')
+
+    try {
+      await store.set('last-run', { ok: true })
+      const [fileName] = await readdir(join(dir, 'prod', 'v2'))
+      const filePath = join(dir, 'prod', 'v2', fileName as string)
+      // 老部署里这个文件可能是 0600（里面有 Webhook URL / SendKey）
+      await chmod(filePath, 0o600)
+
+      await store.set('last-run', { ok: false })
+      expect((await stat(filePath)).mode & 0o777).toBe(0o600)
+    }
+    finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 })

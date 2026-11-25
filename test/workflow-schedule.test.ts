@@ -43,6 +43,10 @@ describe('scheduled attendance time', () => {
     expect(ciWorkflow).toContain('needs: verify-windows')
     expect(ciWorkflow).toContain('name: Cloudflare Worker build smoke test')
     expect(ciWorkflow).toContain('name: Cloud function build smoke test')
+    // 打包走 bsdtar 回退 + 校验 ZIP 里带着入口，光 build 覆盖不到这一段
+    expect(ciWorkflow).toContain('name: Cloud function pack smoke test')
+    expect(ciWorkflow).toContain('dist/cloud-function.zip')
+    expect(ciWorkflow).toContain("./index.js")
   })
 
   it('keeps scheduled workflows active without empty commits', () => {

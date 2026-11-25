@@ -39,8 +39,6 @@ export class MemoryStateStore implements StateStore {
 const CURRENT_LAYOUT_DIR = 'v2'
 /** 单段文件名上限（常见文件系统 255 字节），超过就退化成定长哈希名。 */
 const MAX_FILE_NAME_LENGTH = 150
-/** 旧版文件名的最大字节数；超过它的名字当年也写不进文件系统。 */
-const MAX_LEGACY_FILE_NAME_BYTES = 200
 
 export class FileStateStore implements StateStore {
   constructor(
@@ -59,8 +57,13 @@ export class FileStateStore implements StateStore {
     const legacyPath = this.legacyPathFor(key)
     if (legacyPath) {
       const legacy = await this.readPath<T>(legacyPath)
-      if (legacy.found) {
+      if (legacy.found && belongsToKey(legacy.value, key)) {
         return legacy.value
+      }
+      if (legacy.found) {
+        // 大小写不敏感的卷上，key `main` 会读到旧版本为 `Main` 写的文件；
+        // 直接拿来用会让 `main` 第一次签到就被判成「今天已签到」。
+        console.warn(`旧版状态文件不属于这个 key，已忽略：${legacyPath}`)
       }
     }
     if (current.corrupt || legacyPath) {
@@ -76,7 +79,9 @@ export class FileStateStore implements StateStore {
 
   async set<T>(key: string, value: T): Promise<void> {
     const payload = JSON.stringify(value)
-    await writeFileAtomically(this.pathFor(key), payload)
+    // preserveMode：已有状态文件是 0600 就保持 0600。`last-run.json` 里可能带着完整的
+    // Webhook URL / SendKey，换成原子写之后不能因为 umask 把它放大成 0644。
+    await writeFileAtomically(this.pathFor(key), payload, { preserveMode: true })
     await this.syncLegacyFile(key, payload)
   }
 
@@ -116,7 +121,7 @@ export class FileStateStore implements StateStore {
     try {
       const existing = await readTextFile(legacyPath)
       if (existing !== payload) {
-        await writeFileAtomically(legacyPath, payload)
+        await writeFileAtomically(legacyPath, payload, { preserveMode: true })
       }
     }
     catch (error) {
@@ -214,9 +219,16 @@ const RESERVED_DEVICE_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i
 // Windows 文件名禁用字符，外加控制字符。
 const UNSAFE_LEGACY_FILENAME_CHARS = /[<>:"/\\|?*\u0000-\u001F]/
 
-/** 旧版实现到底能不能写出这个文件名 —— 写不出来的自然没有存量数据可迁移。 */
+/**
+ * 旧版实现到底能不能写出这个文件名 —— 写不出来的自然没有存量数据可迁移。
+ *
+ * 这里只排除「Windows 上确实创建不出来」的名字，不做长度预判：225 个字符的账号 id
+ * 生成的旧文件名（252 字节）在多数文件系统上是能写的，主分支已经写过这种文件，
+ * 预判成「不存在」会让升级当天的去重失效、重复签到。太长的名字读的时候会报
+ * ENAMETOOLONG，按未命中处理即可。
+ */
 function isLegacySegmentCreatable(segment: string): boolean {
-  if (segment === '' || Buffer.byteLength(segment, 'utf8') > MAX_LEGACY_FILE_NAME_BYTES) {
+  if (segment === '') {
     return false
   }
   if (process.platform !== 'win32') {
@@ -225,6 +237,27 @@ function isLegacySegmentCreatable(segment: string): boolean {
   return !UNSAFE_LEGACY_FILENAME_CHARS.test(segment)
     && !RESERVED_DEVICE_NAME.test(segment)
     && !/[. ]$/.test(segment)
+}
+
+/**
+ * 旧文件里的记录是否属于当前 key。
+ *
+ * 只有大小写不敏感的文件系统才会「读到别人的文件」（`Main.json` 被 `main` 命中），
+ * 所以这里按记录自带的 `accountId` / `date` 反查 key 是否匹配；没有这些字段的记录
+ * （`last-run` / `last-summary`）原样信任。
+ */
+function belongsToKey(value: unknown, key: string): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return true
+  }
+  const record = value as Record<string, unknown>
+  if (typeof record.accountId === 'string' && !key.includes(record.accountId)) {
+    return false
+  }
+  if (typeof record.date === 'string' && !key.includes(record.date)) {
+    return false
+  }
+  return true
 }
 
 function isInsideDirectory(basePath: string, targetPath: string): boolean {

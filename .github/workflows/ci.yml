@@ -98,3 +98,18 @@ jobs:
 
       - name: Cloud function build smoke test
         run: pnpm cloud:function:build
+
+      # windows-latest 上没有 `zip`，这一步能过就说明 bsdtar 回退真的生效；
+      # 同时校验产物里确实带着云函数入口，而不是打出一个空包。
+      - name: Cloud function pack smoke test
+        shell: pwsh
+        run: |
+          pnpm cloud:function:pack
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path 'dist/cloud-function.zip'))
+          $entries = $zip.Entries.FullName
+          $zip.Dispose()
+          Write-Host "zip entries: $($entries -join ', ')"
+          if (-not ($entries -contains './index.js')) {
+            throw "cloud function archive is missing index.js"
+          }

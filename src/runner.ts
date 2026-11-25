@@ -18,7 +18,12 @@ export interface RunnerDependencies {
   maxRetries?: number
   accountConcurrency?: number
   secretWriter?: (payload: string) => Promise<void>
-  /** 重新读一次账号配置；用于写回前合并并发运行刚更新的 token。 */
+  /**
+   * 原子写回：把「读最新内容 → 合并 → 写」交给存储后端完成。
+   * 支持的后端会加跨进程锁，避免两个实例并发刷新时互相覆盖 token。
+   */
+  secretUpdater?: (build: (latestSecret: string) => string) => Promise<void>
+  /** 重新读一次账号配置；仅在没有 `secretUpdater` 时使用。 */
   accountsReader?: () => Promise<string>
   stateStore?: StateStore
   forceRun?: boolean
@@ -150,21 +155,24 @@ export async function runAttendance(deps: RunnerDependencies): Promise<RunAttend
         })
       }, deps.maxRetries ?? 3)
 
-      // 「今天已签到」标记不在这里落盘：账号配置（可能带着刚刷新的 token）还没写回，
-      // 一旦写回失败就该让下一次运行重跑，否则新 token 永远存不下来。
-      return {
-        ...accountRun,
-        attendanceMarker: {
-          key: stateKey,
-          value: {
-            status: 'success',
-            accountId: account.id,
-            accountName: account.name,
-            date: runDate,
-            updatedAt: new Date().toISOString(),
-          },
+      // 「今天已签到」标记要等账号配置写回成功后再落盘，否则写回失败时下次运行会
+      // 直接跳过该账号，新 token 永远存不下来。
+      // 但「不需要写回凭据」的账号没有这个依赖，当场就记，别被别的账号的写回失败牵连。
+      const marker: AttendanceMarker = {
+        key: stateKey,
+        value: {
+          status: 'success',
+          accountId: account.id,
+          accountName: account.name,
+          date: runDate,
+          updatedAt: new Date().toISOString(),
         },
       }
+      if (accountRun.shouldUpdateSecret) {
+        return { ...accountRun, attendanceMarker: marker }
+      }
+      await recordAttendanceMarker(deps.stateStore, marker)
+      return { ...accountRun, attendanceMarker: undefined }
     }
     catch (error) {
       return {
@@ -186,17 +194,8 @@ export async function runAttendance(deps: RunnerDependencies): Promise<RunAttend
   const secretUpdateCount = accountResults.filter(result => result.shouldUpdateSecret).length
   const accountSummaries = accountResults.map(result => result.summary)
 
-  if (secretUpdateCount > 0 && deps.secretWriter) {
-    // 写回前重新读一次账号文件，把本次更新的字段合并进最新内容：
-    // 两个实例并发跑、各自刷新了不同账号时，直接写回启动快照会抹掉对方刚拿到的 token；
-    // 顺带只覆盖变动的字段，账号 JSON 里不认识的字段（自定义备注等）也不会被丢掉。
-    const latestSecret = await readLatestAccountsSecret(deps)
-    await deps.secretWriter(buildUpdatedAccountsSecret({
-      originalSecret: deps.accountsSecret,
-      latestSecret,
-      accounts,
-      updatedAccounts,
-    }))
+  if (secretUpdateCount > 0) {
+    await persistUpdatedAccounts(deps, accounts, updatedAccounts)
   }
 
   await recordAttendanceMarkers(deps.stateStore, accountResults)
@@ -251,34 +250,56 @@ interface AttendanceMarker {
 }
 
 /** 把「今天已签到」标记落到状态存储。失败只影响当天的去重，不该影响这次的结果。 */
+async function recordAttendanceMarker(stateStore: StateStore | undefined, marker: AttendanceMarker): Promise<void> {
+  try {
+    await stateStore?.set(marker.key, marker.value, { ttlSeconds: 60 * 60 * 36 })
+  }
+  catch (error) {
+    console.warn(`写入签到状态失败（今天可能重复签到）：${errorMessage(error)}`)
+  }
+}
+
 async function recordAttendanceMarkers(
   stateStore: StateStore | undefined,
   results: AccountResult[],
 ): Promise<void> {
   for (const result of results) {
-    if (!result.attendanceMarker) {
-      continue
-    }
-    try {
-      await stateStore?.set(result.attendanceMarker.key, result.attendanceMarker.value, { ttlSeconds: 60 * 60 * 36 })
-    }
-    catch (error) {
-      console.warn(`写入签到状态失败（今天可能重复签到）：${errorMessage(error)}`)
+    if (result.attendanceMarker) {
+      await recordAttendanceMarker(stateStore, result.attendanceMarker)
     }
   }
 }
 
-async function readLatestAccountsSecret(deps: RunnerDependencies): Promise<string | undefined> {
-  if (!deps.accountsReader) {
-    return undefined
+/**
+ * 把本次刷新的凭据写回账号配置。
+ *
+ * 优先后端自己的 `updateAccounts`（文件后端会用跨进程锁把「读 → 合并 → 写」整体
+ * 包住）；没有的话退化成「读一次 + 合并 + 写一次」，并发时仍有覆盖窗口。
+ *
+ * 读最新内容失败时直接抛出、不动原文件：退化成启动快照会把运行期间新增的账号写没。
+ */
+async function persistUpdatedAccounts(
+  deps: RunnerDependencies,
+  accounts: TaygedoAccount[],
+  updatedAccounts: TaygedoAccount[],
+): Promise<void> {
+  const build = (latestSecret: string) => buildUpdatedAccountsSecret({
+    originalSecret: deps.accountsSecret,
+    latestSecret,
+    accounts,
+    updatedAccounts,
+  })
+
+  if (deps.secretUpdater) {
+    await deps.secretUpdater(build)
+    return
   }
-  try {
-    return await deps.accountsReader()
+  if (!deps.secretWriter) {
+    console.warn('账号存储是只读的，本次刷新出的 token 只在本次运行内有效；如需持久化请改用可写存储')
+    return
   }
-  catch (error) {
-    console.warn(`读取最新账号配置失败，改按启动时的内容合并：${errorMessage(error)}`)
-    return undefined
-  }
+  const latestSecret = deps.accountsReader ? await deps.accountsReader() : deps.accountsSecret
+  await deps.secretWriter(build(latestSecret))
 }
 
 /** 写回账号配置时可以变动的字段（其余字段不是用户数据就是本次运行不会碰的）。 */
@@ -300,11 +321,20 @@ const MUTABLE_ACCOUNT_FIELDS = [
 ] as const satisfies ReadonlyArray<keyof TaygedoAccount>
 
 /**
+ * 旧版本写过、现在只应该被清掉的明文密码字段。
+ *
+ * README 承诺「旧配置里的 password / passwordUpdatedAt 读取后丢弃、下次写回自然清理」，
+ * 所以写回时对所有记录都要摘掉它们（包括本次没刷新的账号），不能原样带回去。
+ */
+const LEGACY_SECRET_FIELDS = ['password', 'passwordUpdatedAt'] as const
+
+/**
  * 生成要写回的账号配置 JSON。
  *
- * 以「重新读到的最新内容」为底稿、只覆盖本次运行真正改过的字段，因此：
+ * 以「最新内容」为底稿、只覆盖本次运行真正改过的字段，因此：
  * - 并发实例各自刷新不同账号时，后写的一方不会用旧快照覆盖对方的新 token；
- * - 账号 JSON 里本程序不认识的字段原样保留。
+ * - 账号 JSON 里本程序不认识的字段（自定义备注等）原样保留；
+ * - 旧明文密码字段被清掉。
  */
 export function buildUpdatedAccountsSecret(options: {
   originalSecret: string
@@ -312,9 +342,7 @@ export function buildUpdatedAccountsSecret(options: {
   accounts: TaygedoAccount[]
   updatedAccounts: TaygedoAccount[]
 }): string {
-  const baseAccounts = parseRawAccounts(options.latestSecret)
-    ?? parseRawAccounts(options.originalSecret)
-    ?? []
+  const baseAccounts = resolveBaseAccounts(options)
 
   const originals = new Map(options.accounts.map(account => [account.id, account]))
   const patches = new Map<string, Record<string, unknown>>()
@@ -330,21 +358,32 @@ export function buildUpdatedAccountsSecret(options: {
   }
 
   if (patches.size === 0) {
-    // 没有任何字段需要更新，保持底稿原样（连带保住不认识的字段）。
-    return JSON.stringify(baseAccounts.length > 0 ? baseAccounts : options.updatedAccounts, null, 2)
+    // 没有任何字段需要更新，保持底稿原样（连带保住不认识的字段，但清掉旧明文密码）。
+    return JSON.stringify(
+      baseAccounts.length > 0 ? baseAccounts.map(stripLegacySecretFields) : options.updatedAccounts,
+      null,
+      2,
+    )
   }
 
   const applied = new Set<string>()
   const merged = baseAccounts.map((raw) => {
     if (!isPlainObject(raw) || typeof raw.id !== 'string') {
-      return raw
+      return stripLegacySecretFields(raw)
     }
+    const original = originals.get(raw.id)
     const patch = patches.get(raw.id)
-    if (!patch) {
-      return raw
+    if (!original || !patch) {
+      return stripLegacySecretFields(raw)
+    }
+    if (!isSameAccountIdentity(original, raw)) {
+      // id 只是配置名（`main` 可以随时改成另一个用户）：身份对不上就不能把旧 token
+      // 贴到新用户的记录上，否则会写出「新 uid + 旧 token」的坏组合。
+      console.warn(`账号 ${raw.id} 在运行期间被替换为其他用户，丢弃本次写回`)
+      return stripLegacySecretFields(raw)
     }
     applied.add(raw.id)
-    return { ...raw, ...patch }
+    return stripLegacySecretFields({ ...raw, ...patch })
   })
 
   for (const id of patches.keys()) {
@@ -355,6 +394,47 @@ export function buildUpdatedAccountsSecret(options: {
   }
 
   return JSON.stringify(merged, null, 2)
+}
+
+function resolveBaseAccounts(options: {
+  originalSecret: string
+  latestSecret?: string
+  updatedAccounts: TaygedoAccount[]
+}): unknown[] {
+  if (options.latestSecret === undefined) {
+    return parseRawAccounts(options.originalSecret) ?? options.updatedAccounts
+  }
+  const latest = parseRawAccounts(options.latestSecret)
+  if (latest === undefined) {
+    // 调用方已经能读到最新内容，说明就该以它为准；解析不了还硬写回去等于拿旧快照覆盖。
+    throw new Error('最新账号配置不是合法 JSON，已跳过写回以免覆盖运行期间新增的账号')
+  }
+  return latest
+}
+
+/** 账号身份是否还是启动时那个用户（uid / deviceId 是用户身份，id 只是配置名）。 */
+function isSameAccountIdentity(original: TaygedoAccount, raw: Record<string, unknown>): boolean {
+  if (typeof raw.uid === 'string' && raw.uid !== original.uid) {
+    return false
+  }
+  if (typeof raw.deviceId === 'string' && raw.deviceId !== original.deviceId) {
+    return false
+  }
+  return true
+}
+
+function stripLegacySecretFields(raw: unknown): unknown {
+  if (!isPlainObject(raw)) {
+    return raw
+  }
+  let stripped: Record<string, unknown> | undefined
+  for (const field of LEGACY_SECRET_FIELDS) {
+    if (field in raw) {
+      stripped ??= { ...raw }
+      delete stripped[field]
+    }
+  }
+  return stripped ?? raw
 }
 
 function diffAccountFields(original: TaygedoAccount, updated: TaygedoAccount): Record<string, unknown> {

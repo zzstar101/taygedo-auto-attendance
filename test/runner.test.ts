@@ -5,6 +5,8 @@ import { describe, expect, it, vi } from 'vitest'
 import { runAttendance } from '../src/runner.js'
 import { encryptPassword } from '../src/config/credentials.js'
 import { FileStateStore, MemoryStateStore, type StateStore } from '../src/stores/state-store.js'
+import { EnvAccountStore } from '../src/stores/account-store.js'
+import { AttendanceService } from '../src/services/attendance-service.js'
 import { TaygedoApi } from '../src/taygedo/api.js'
 
 /** 写回的账号配置：解析后比较（JSON 字段顺序不影响结果）。 */
@@ -1728,5 +1730,189 @@ describe('runAttendance secret and attendance bookkeeping', () => {
 
     expect(calls).toEqual(['secret', 'marker'])
     await expect(stateStore.get('attendance:main:2026-05-26')).resolves.toEqual(expect.objectContaining({ status: 'success' }))
+  })
+})
+
+describe('runAttendance account write-back edge cases', () => {
+  const shanghaiNoon = new Date('2026-05-26T04:00:00.000Z')
+
+  function createApi() {
+    return {
+      refreshToken: vi.fn().mockResolvedValue({ accessToken: 'access-main', refreshToken: 'new-main' }),
+      getGameRoles: vi.fn().mockResolvedValue({ roles: [] }),
+      getGameRecordCards: vi.fn().mockResolvedValue({ cards: [] }),
+      appSignin: vi.fn().mockResolvedValue({ exp: 10, goldCoin: 20 }),
+      getSigninState: vi.fn().mockResolvedValue({ days: 1 }),
+      getSigninRewards: vi.fn().mockResolvedValue([]),
+      gameSignin: vi.fn().mockResolvedValue(undefined),
+    }
+  }
+
+  function account(overrides: Record<string, unknown> = {}) {
+    return { id: 'main', name: '主账号', uid: '1', deviceId: 'device-1', refreshToken: 'old-main', ...overrides }
+  }
+
+  it('drops legacy plaintext password fields from every record and keeps custom fields', async () => {
+    const secretWriter = vi.fn()
+    const withLegacySecret = {
+      ...account(),
+      password: 'plain-text-password',
+      passwordUpdatedAt: '2026-01-01T00:00:00.000Z',
+      note: '自定义备注',
+    }
+    // 本次没有刷新的账号也要清掉旧明文密码
+    const untouched = {
+      id: 'alt',
+      name: '备用账号',
+      uid: '2',
+      deviceId: 'device-2',
+      accessToken: 'stored-alt',
+      refreshToken: 'old-alt',
+      password: 'another-plaintext',
+      passwordUpdatedAt: '2026-01-02T00:00:00.000Z',
+      note: '备用备注',
+    }
+
+    await runAttendance({
+      accountsSecret: JSON.stringify([withLegacySecret, untouched]),
+      api: createApi(),
+      maxRetries: 1,
+      coinTasks: false,
+      secretWriter,
+    })
+
+    const written = writtenAccounts(secretWriter) as Array<Record<string, unknown>>
+    expect(written[0]).toEqual(expect.objectContaining({ id: 'main', note: '自定义备注', accessToken: 'access-main' }))
+    expect(written[1]).toEqual(expect.objectContaining({ id: 'alt', note: '备用备注', refreshToken: 'old-alt' }))
+    for (const record of written) {
+      expect(record).not.toHaveProperty('password')
+      expect(record).not.toHaveProperty('passwordUpdatedAt')
+    }
+  })
+
+  it('refuses to write back when the latest account file cannot be parsed', async () => {
+    const secretWriter = vi.fn()
+
+    await expect(runAttendance({
+      accountsSecret: JSON.stringify([account()]),
+      // 运行期间文件被手工改坏（或只写了一半）
+      accountsReader: async () => '[{"id":',
+      api: createApi(),
+      maxRetries: 1,
+      coinTasks: false,
+      secretWriter,
+    })).rejects.toThrow('最新账号配置不是合法 JSON')
+
+    expect(secretWriter).not.toHaveBeenCalled()
+  })
+
+  it('refuses to write back when the latest account file cannot be read', async () => {
+    const secretWriter = vi.fn()
+
+    await expect(runAttendance({
+      accountsSecret: JSON.stringify([account()]),
+      accountsReader: async () => { throw new Error('EACCES: permission denied') },
+      api: createApi(),
+      maxRetries: 1,
+      coinTasks: false,
+      secretWriter,
+    })).rejects.toThrow('EACCES')
+
+    // 退回启动快照会把这期间新增的账号写没，所以宁可不写
+    expect(secretWriter).not.toHaveBeenCalled()
+  })
+
+  it('discards the update when the config id was reused by another user', async () => {
+    const secretWriter = vi.fn()
+
+    await runAttendance({
+      accountsSecret: JSON.stringify([account()]),
+      // 同一个 config id `main` 在运行期间被换成另一个用户
+      accountsReader: async () => JSON.stringify([account({ uid: '999', deviceId: 'other-device', refreshToken: 'other-refresh' })]),
+      api: createApi(),
+      maxRetries: 1,
+      coinTasks: false,
+      secretWriter,
+    })
+
+    const [written] = writtenAccounts(secretWriter) as Array<Record<string, unknown>>
+    expect(written).toEqual(expect.objectContaining({ uid: '999', deviceId: 'other-device', refreshToken: 'other-refresh' }))
+    expect(written).not.toHaveProperty('accessToken')
+    expect(written).not.toHaveProperty('tokenUpdatedAt')
+  })
+
+  it('marks accounts that need no credential write-back even when another account fails', async () => {
+    const stateStore = new MemoryStateStore('test')
+    const secretWriter = vi.fn().mockRejectedValue(new Error('EACCES: permission denied'))
+    const api = createApi()
+
+    await expect(runAttendance({
+      accountsSecret: JSON.stringify([
+        // 已有 accessToken：本次不需要写回凭据
+        account({ id: 'plain', name: '普通账号', uid: '1', deviceId: 'device-1', accessToken: 'stored-access' }),
+        // 没有 accessToken：会刷新并需要写回
+        account({ id: 'refresh', name: '刷新账号', uid: '2', deviceId: 'device-2', refreshToken: 'old-2' }),
+      ]),
+      api,
+      stateStore,
+      maxRetries: 1,
+      coinTasks: false,
+      now: shanghaiNoon,
+      secretWriter,
+    })).rejects.toThrow('EACCES')
+
+    // plain 没有依赖写回，标记应该已经落下；refresh 的标记要等写回成功，此时不该存在
+    await expect(stateStore.get('attendance:plain:2026-05-26')).resolves.toEqual(expect.objectContaining({ status: 'success' }))
+    await expect(stateStore.get('attendance:refresh:2026-05-26')).resolves.toBeUndefined()
+  })
+
+  it('keeps running with a read-only account store', async () => {
+    const stateStore = new MemoryStateStore('test')
+    const api = createApi()
+
+    // 环境变量账号存储：没有 writer / updater，刷新出的 token 只能本次有效
+    const result = await runAttendance({
+      accountsSecret: JSON.stringify([account()]),
+      api,
+      stateStore,
+      maxRetries: 1,
+      coinTasks: false,
+      now: shanghaiNoon,
+    })
+
+    expect(result.successCount).toBe(1)
+    expect(result.summary).toContain('成功：1')
+    await expect(stateStore.get('attendance:main:2026-05-26')).resolves.toEqual(expect.objectContaining({ status: 'success' }))
+  })
+})
+
+describe('AttendanceService with a read-only account store', () => {
+  it('still records attendance when the account store cannot be written', async () => {
+    const stateStore = new MemoryStateStore('test')
+    const api = {
+      refreshToken: vi.fn().mockResolvedValue({ accessToken: 'access-main', refreshToken: 'new-main' }),
+      getGameRoles: vi.fn().mockResolvedValue({ roles: [] }),
+      getGameRecordCards: vi.fn().mockResolvedValue({ cards: [] }),
+      appSignin: vi.fn().mockResolvedValue({ exp: 10, goldCoin: 20 }),
+      getSigninState: vi.fn().mockResolvedValue({ days: 1 }),
+      getSigninRewards: vi.fn().mockResolvedValue([]),
+      gameSignin: vi.fn().mockResolvedValue(undefined),
+    }
+    const service = new AttendanceService({
+      // TAYGEDO_ACCOUNTS 环境变量：只读，写回必然失败
+      accountStore: new EnvAccountStore(JSON.stringify([
+        { id: 'main', name: '主账号', uid: '1', deviceId: 'device-1', refreshToken: 'old-main' },
+      ])),
+      stateStore,
+      api,
+      maxRetries: 1,
+      coinTasks: false,
+    })
+
+    const result = await service.run()
+
+    // 不能因为「存不下新 token」就把整次签到判成失败
+    expect(result.successCount).toBe(1)
+    expect(result.summary).toContain('成功：1')
   })
 })
