@@ -635,9 +635,19 @@ account_name=主账号
 
 每日签到默认会尝试调用云异环 `getUserInfo` 接口，触发每日首次登录赠送时长，并在通知摘要里显示本次赠送分钟和剩余分钟。此功能优先复用账号 JSON 中的 `laohuToken` / `laohuUserId`；缺少 token 但有手机号和可用密码时，会先密码登录拿老虎 token 并写回账号配置。
 
-老虎 token 会过期，过期后接口返回 `code=10004`（`登陆失效，需要重新登陆`），而 `refreshToken` 只能续期塔吉多 token、续不了老虎 token。因此摘要里出现该错误时，程序会用手机号和密码自动重新登录换新老虎 token 并重试一次，成功后把新 token 写回账号配置：
-- 账号配置里有手机号和密码（`TAYGEDO_PASSWORDS` / `encryptedPassword`）时，下一次运行会自动恢复，无需手工处理。
-- 没有可用密码时，该账号的云异环任务会失败并提示更新 `laohuToken` / `laohuUserId`，或重新跑一次登录流程补上手机号和密码；APP 签到、游戏签到和金币任务不受影响。
+老虎 token 会过期，过期后接口返回 `code=10004`（`登陆失效，需要重新登陆`），而 `refreshToken` 只能续期塔吉多 token、续不了老虎 token。因此摘要里出现该错误时，程序会按下面的顺序自动续期并重试一次，成功后把新 token 写回账号配置：
+
+1. 用手机号 + 密码走**塔吉多 App**（appId 10550）的密码登录，刷新 `laohuToken` / `laohuUserId`；
+2. 上一步被拒（例如 `用户名或密码错误`）时，改用**云异环 App**（appId 10597）自己的密码登录，拿到云异环专属 token 写进 `cloudToken` / `cloudUserId`——老虎各 App 的密码状态是独立的，塔吉多登录失败不代表云异环也失败，而 `cloud/game` 接口认的正是云异环自己的 token；
+3. 两步都失败时，会调用云异环的 `query/whetherSetPassword` 判断该手机号到底有没有设置过密码，并在摘要里直接说明是「没有设置密码」还是「密码被拒绝（可能已修改或触发风控）」。
+
+所以：
+
+- 账号配置里有手机号和密码（`TAYGEDO_PASSWORDS` / `TAYGEDO_LOGIN_PASSWORD` / `encryptedPassword`）时，token 过期通常能自动恢复；
+- 摘要提示「没有设置密码」时，说明这个号一直用短信验证码登录，无法自动续期，需要重新跑一次登录流程刷新 token（或在老虎平台设一个密码）；
+- 摘要提示「密码被拒绝」时，去更新 `TAYGEDO_PASSWORDS` 里的密码，或重新跑一次登录流程。
+
+账号 JSON 里除 `laohuToken` / `laohuUserId` 外，还可能被写入 `cloudToken` / `cloudUserId`（云异环 App 的登录态），它们由程序自动维护，不需要手工填写。
 
 写回账号配置时只覆盖本次运行真正改动的字段，并且：
 

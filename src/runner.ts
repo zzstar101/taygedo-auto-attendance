@@ -47,6 +47,8 @@ type AttendanceApi = Pick<TaygedoApi, 'refreshToken' | 'getGameRoles' | 'appSign
     | 'sharePost'
     | 'getUserCoinTaskState'
     | 'cloudGetUserInfo'
+    | 'cloudLoginWithPassword'
+    | 'cloudQueryWhetherSetPassword'
   >>
 
 export interface RunAttendanceResult {
@@ -817,6 +819,7 @@ async function runCloudDuration(
   // 再调用会让 `this` 变成 undefined，真实 TaygedoApi 实例上直接 TypeError。
   const cloudGetUserInfo = api.cloudGetUserInfo.bind(api)
   const loginWithPassword = api.loginWithPassword?.bind(api)
+  const cloudLoginWithPassword = api.cloudLoginWithPassword?.bind(api)
   let updatedAccount: TaygedoAccount | undefined
 
   const respond = (summary: CloudDurationSummary) => ({
@@ -824,8 +827,9 @@ async function runCloudDuration(
     ...(updatedAccount ? { updatedAccount, shouldUpdateSecret: true } : {}),
   })
 
-  // 云异环只认老虎 token，refreshToken 无法续期：token 过期（code=10004）时
-  // 只能用手机号 + 密码重新登录一次换个新 token。
+  // 云异环只认老虎体系 token，refreshToken 续不了：token 过期（code=10004）时只能用
+  // 手机号 + 密码重新登录。先复用塔吉多 App 的登录（laohuToken），被拒再退到云异环
+  // 自己的 App 身份（cloudToken）——老虎各 App 的密码状态是独立的。
   const reloginLaohu = async (): Promise<LaohuCredentials | undefined> => {
     const phone = account.phone
     const password = resolveAccountPassword(account, accountPasswords, credentialKey)
@@ -845,21 +849,59 @@ async function runCloudDuration(
     return { token: login.token, userId: login.userId }
   }
 
-  let credentials: LaohuCredentials | undefined = account.laohuToken && account.laohuUserId
-    ? { token: account.laohuToken, userId: account.laohuUserId }
-    : undefined
+  const reloginCloud = async (): Promise<LaohuCredentials | undefined> => {
+    const phone = account.phone
+    const password = resolveAccountPassword(account, accountPasswords, credentialKey)
+    if (!phone || !password || !cloudLoginWithPassword) {
+      return undefined
+    }
+    const login = await cloudLoginWithPassword(phone, password, account.deviceId)
+    // 云异环 token 单独存：塔吉多登录态（laohuToken）还要给 userCenterLogin 用，
+    // 两个 App 的 token 不能混。
+    updatedAccount = {
+      ...account,
+      cloudToken: login.token,
+      cloudUserId: login.userId,
+    }
+    return { token: login.token, userId: login.userId }
+  }
+
+  const tryRelogin = async (): Promise<CloudRefreshResult> => {
+    const errors: unknown[] = []
+    for (const attempt of [reloginLaohu, reloginCloud]) {
+      try {
+        const result = await attempt()
+        if (result) {
+          return { credentials: result }
+        }
+      }
+      catch (error) {
+        errors.push(error)
+      }
+    }
+    // 两个入口都没配置（没手机号 / 没密码）时 errors 为空，交给调用方判成 skipped
+    return { loginError: errors[0] }
+  }
+
+  // 云异环 token 优先（它才是 cloud/game 接口认的），没有再退回塔吉多登录的 laohuToken。
+  let credentials: LaohuCredentials | undefined = account.cloudToken && account.cloudUserId
+    ? { token: account.cloudToken, userId: account.cloudUserId }
+    : account.laohuToken && account.laohuUserId
+      ? { token: account.laohuToken, userId: account.laohuUserId }
+      : undefined
 
   if (!credentials) {
-    try {
-      credentials = await reloginLaohu()
+    const attempt = await tryRelogin()
+    if (attempt.credentials) {
+      credentials = attempt.credentials
     }
-    catch (error) {
+    else if (attempt.loginError) {
       return respond({
         status: 'failed',
-        error: `老虎登录失败：${errorMessage(error)}`,
+        error: await describeLaohuLoginFailure(api, account, attempt.loginError),
       })
     }
-    if (!credentials) {
+    else {
       return respond({
         status: 'skipped',
         skippedReason: '账号缺少 laohuToken/laohuUserId',
@@ -878,25 +920,22 @@ async function runCloudDuration(
       })
     }
 
-    let refreshed: LaohuCredentials | undefined
-    try {
-      refreshed = await reloginLaohu()
-    }
-    catch (loginError) {
+    const attempt = await tryRelogin()
+    if (attempt.loginError) {
       return respond({
         status: 'failed',
-        error: `老虎登录失败：${errorMessage(loginError)}`,
+        error: await describeLaohuLoginFailure(api, account, attempt.loginError),
       })
     }
-    if (!refreshed) {
+    if (!attempt.credentials) {
       return respond({
         status: 'failed',
-        error: `${errorMessage(error)}；laohuToken 已过期，请重新执行登录流程（或手动更新 laohuToken/laohuUserId），也可以补充手机号和密码以便之后自动重新登录`,
+        error: `${errorMessage(error)}；laohuToken 已过期，请重新执行登录流程（或手动更新 laohuToken/laohuUserId、cloudToken/cloudUserId），也可以补充手机号和密码以便之后自动重新登录`,
       })
     }
 
     try {
-      return respond(toCloudDurationSummary(await cloudGetUserInfo(refreshed.token, refreshed.userId, account.deviceId)))
+      return respond(toCloudDurationSummary(await cloudGetUserInfo(attempt.credentials.token, attempt.credentials.userId, account.deviceId)))
     }
     catch (retryError) {
       return respond({
@@ -910,6 +949,45 @@ async function runCloudDuration(
 interface LaohuCredentials {
   token: string
   userId: string
+}
+
+interface CloudRefreshResult {
+  credentials?: LaohuCredentials
+  loginError?: unknown
+}
+
+/**
+ * 老虎 token 过期后密码登录失败时，补一次「是否设置过密码」的诊断。
+ *
+ * 老虎各 App 的密码状态是分开的，`用户名或密码错误` 既可能是密码写错，也可能是这个号
+ * 从来没用密码登录过（只走过短信验证码）——两种情况用户要做的事完全不同。
+ */
+async function describeLaohuLoginFailure(
+  api: AttendanceApi,
+  account: TaygedoAccount,
+  error: unknown,
+): Promise<string> {
+  const base = `老虎登录失败：${errorMessage(error)}`
+  const reloginHint = '请重新执行一次登录流程（短信验证码）刷新 token'
+  const phone = account.phone
+  if (!phone || !api.cloudQueryWhetherSetPassword) {
+    return `${base}；laohuToken 已过期，${reloginHint}`
+  }
+
+  try {
+    const state = await api.cloudQueryWhetherSetPassword(phone, account.deviceId)
+    if (state.havePwd === false) {
+      return `${base}；laohuToken 已过期，且该手机号在老虎平台没有设置密码，无法自动重新登录：${reloginHint}，或先在老虎平台设置密码并把密码配置到 TAYGEDO_PASSWORDS`
+    }
+    if (state.havePwd === true) {
+      return `${base}；laohuToken 已过期，该账号有老虎密码但当前密码被拒绝（可能已修改，或本次登录触发风控）：请更新 TAYGEDO_PASSWORDS，或${reloginHint}`
+    }
+  }
+  catch {
+    // 诊断失败不影响原始错误信息
+  }
+
+  return `${base}；laohuToken 已过期，${reloginHint}`
 }
 
 function toCloudDurationSummary(result: CloudDurationResponse): CloudDurationSummary {

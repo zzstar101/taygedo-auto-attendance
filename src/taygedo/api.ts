@@ -20,6 +20,13 @@ const CLOUD_CHANNEL_ID = '9'
 const CLOUD_BID = 'com.pwrd.cloud.yh.laohu'
 const CLOUD_SDK_VERSION = '1.34.0'
 const CLOUD_APP_VERSION = '1.1.0'
+// 云异环登录系列接口（m/newApi）用的参数与 game 接口不同，单独一套。
+const CLOUD_LOGIN_SDK_VERSION = '4.327.1'
+const CLOUD_LOGIN_VERSION_CODE = '32'
+const CLOUD_LOGIN_CHANNEL_ID = '1'
+const CLOUD_LOGIN_DEVICE = 'TB321FU'
+const CLOUD_LOGIN_DEVICE_SYS = '15'
+const CLOUD_LOGIN_USER_AGENT = 'LaohuSDK/4.327.1 (android os 15;mobile  manufacturer LENOVO; model TB321FU)'
 
 export interface RefreshTokenResponse {
   accessToken: string
@@ -84,6 +91,11 @@ export interface CoinState {
 export interface CloudDurationResponse {
   gave: number
   remained?: number
+}
+
+export interface CloudPasswordState {
+  /** 该手机号在云异环（appId 10597）下是否设置过密码；接口没给出时为 undefined。 */
+  havePwd?: boolean
 }
 
 /** 老虎 token 过期时，接口仍返回 HTTP 200，只在业务码/文案里要求重新登录。 */
@@ -723,6 +735,109 @@ export class TaygedoApi {
     return {
       gave,
       ...(remained === undefined ? {} : { remained }),
+    }
+  }
+
+  /**
+   * 用云异环自己的 App 身份（appId 10597）走密码登录，拿到云异环专属 token。
+   *
+   * 老虎各 App 的密码状态是独立的：塔吉多密码登录被拒时，云异环这边可能仍然能登录成功，
+   * 而 `cloud/game/getUserInfo` 需要的正是云异环自己的 token。
+   */
+  async cloudLoginWithPassword(phone: string, password: string, deviceId: string): Promise<LoginWithCaptchaResponse> {
+    const body = signedCloudBody({
+      adm: '',
+      appId: CLOUD_APP_ID,
+      bid: CLOUD_BID,
+      channelId: CLOUD_LOGIN_CHANNEL_ID,
+      deviceId,
+      deviceModel: CLOUD_LOGIN_DEVICE,
+      deviceName: CLOUD_LOGIN_DEVICE,
+      deviceSys: CLOUD_LOGIN_DEVICE_SYS,
+      deviceType: CLOUD_LOGIN_DEVICE,
+      idfa: '',
+      mac: '',
+      sdkVersion: CLOUD_LOGIN_SDK_VERSION,
+      t: String(Date.now()),
+      version: CLOUD_LOGIN_VERSION_CODE,
+      password: aesBase64Encode(password, CLOUD_APP_KEY),
+      username: aesBase64Encode(phone, CLOUD_APP_KEY),
+    })
+
+    const response = await this.fetchImpl(`${LAOHU_BASE_URL}/openApi/secureLogin`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent': CLOUD_LOGIN_USER_AGENT,
+        'robot-auth-type': '2',
+      },
+      body,
+    })
+
+    const data = await readJson(response, 'cloudLoginWithPassword', { preserveIntegerFields: ['userId'] }) as {
+      code?: number
+      message?: string
+      msg?: string
+      result?: {
+        token?: string
+        userId?: string | number | null
+      }
+    }
+
+    const userId = normalizeLaohuUserId(data.result?.userId)
+    if (!response.ok || data.code !== 0 || !data.result?.token || !userId) {
+      throw apiResponseError('cloudLoginWithPassword', response, data, '云异环密码登录请求失败')
+    }
+
+    return {
+      token: data.result.token,
+      userId,
+    }
+  }
+
+  /**
+   * 查询该手机号在云异环（appId 10597）下是否设置过密码。
+   *
+   * 老虎各 App 的密码状态是分开的：塔吉多密码登录被拒（`用户名或密码错误`）时，
+   * 这个接口能判断是"密码不对"还是"这个号压根没设密码"，从而给出可操作的提示。
+   */
+  async cloudQueryWhetherSetPassword(phone: string, deviceId: string): Promise<CloudPasswordState> {
+    const params: Record<string, string> = {
+      deviceType: CLOUD_LOGIN_DEVICE,
+      deviceId,
+      deviceName: CLOUD_LOGIN_DEVICE,
+      deviceModel: CLOUD_LOGIN_DEVICE,
+      deviceSys: CLOUD_LOGIN_DEVICE_SYS,
+      versionCode: CLOUD_LOGIN_VERSION_CODE,
+      sdkVersion: CLOUD_LOGIN_SDK_VERSION,
+      t: String(Math.floor(Date.now() / 1000)),
+      appId: CLOUD_APP_ID,
+      bid: CLOUD_BID,
+      channelId: CLOUD_LOGIN_CHANNEL_ID,
+      cellphone: phone,
+    }
+    const query = new URLSearchParams({ ...params, sign: cloudSign(params) })
+    const response = await this.fetchImpl(
+      `${LAOHU_BASE_URL}/m/newApi/query/whetherSetPassword?${query.toString()}`,
+      {
+        method: 'GET',
+        headers: { 'User-Agent': CLOUD_LOGIN_USER_AGENT },
+      },
+    )
+
+    const data = await readJson(response, 'cloudQueryWhetherSetPassword') as {
+      code?: number
+      message?: string
+      msg?: string
+      result?: { havePwd?: unknown }
+    }
+
+    if (!response.ok || data.code !== 0 || !isRecord(data.result)) {
+      throw apiResponseError('cloudQueryWhetherSetPassword', response, data, '查询云异环密码状态失败')
+    }
+
+    return {
+      havePwd: typeof data.result.havePwd === 'boolean' ? data.result.havePwd : undefined,
     }
   }
 }

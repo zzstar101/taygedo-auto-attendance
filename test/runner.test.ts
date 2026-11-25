@@ -876,6 +876,187 @@ describe('runAttendance', () => {
     })
   })
 
+  it('falls back to the cloud app login when the laohu password login is rejected', async () => {
+    const secretWriter = vi.fn()
+    const api = {
+      refreshToken: vi.fn(),
+      loginWithPassword: vi.fn().mockRejectedValue(
+        new Error('loginWithPassword：用户名或密码错误（HTTP 200，code=1）'),
+      ),
+      cloudLoginWithPassword: vi.fn().mockResolvedValue({ token: 'cloud-token', userId: 'laohu-user' }),
+      cloudQueryWhetherSetPassword: vi.fn().mockResolvedValue({ havePwd: true }),
+      getGameRoles: vi.fn().mockResolvedValue({ roles: [] }),
+      appSignin: vi.fn().mockResolvedValue({ exp: 10, goldCoin: 20 }),
+      getSigninState: vi.fn(),
+      getSigninRewards: vi.fn(),
+      gameSignin: vi.fn(),
+      cloudGetUserInfo: vi.fn()
+        .mockRejectedValueOnce(new Error('cloudGetUserInfo：登陆失效，需要重新登陆（HTTP 200，code=10004）'))
+        .mockResolvedValueOnce({ gave: 15, remained: 120 }),
+    }
+
+    const result = await runAttendance({
+      accountsSecret: JSON.stringify([
+        {
+          id: 'main',
+          name: '主账号',
+          uid: '1',
+          deviceId: 'device-1',
+          accessToken: 'stored-access',
+          refreshToken: 'old-main',
+          laohuToken: 'stale-laohu-token',
+          laohuUserId: 'laohu-user',
+          phone: '13800138000',
+        },
+      ]),
+      api,
+      accountPasswords: { main: 'secret-password' },
+      maxRetries: 1,
+      secretWriter,
+    })
+
+    expect(api.cloudLoginWithPassword).toHaveBeenCalledWith('13800138000', 'secret-password', 'device-1')
+    expect(api.cloudGetUserInfo).toHaveBeenNthCalledWith(2, 'cloud-token', 'laohu-user', 'device-1')
+    expect(result.accounts[0]?.cloudDuration).toEqual({
+      status: 'success',
+      gave: 15,
+      remained: 120,
+    })
+    expect(result.updatedAccounts[0]).toEqual(expect.objectContaining({
+      cloudToken: 'cloud-token',
+      cloudUserId: 'laohu-user',
+      // 塔吉多登录失败时不覆盖 laohuToken，避免影响后续 userCenterLogin 重建会话
+      laohuToken: 'stale-laohu-token',
+    }))
+    expect(secretWriter).toHaveBeenCalled()
+  })
+
+  it('explains an expired laohu token when the account never set a laohu password', async () => {
+    const api = {
+      refreshToken: vi.fn(),
+      loginWithPassword: vi.fn().mockRejectedValue(
+        new Error('loginWithPassword：用户名或密码错误（HTTP 200，code=1）'),
+      ),
+      cloudQueryWhetherSetPassword: vi.fn().mockResolvedValue({ havePwd: false }),
+      getGameRoles: vi.fn().mockResolvedValue({ roles: [] }),
+      appSignin: vi.fn().mockResolvedValue({ exp: 10, goldCoin: 20 }),
+      getSigninState: vi.fn(),
+      getSigninRewards: vi.fn(),
+      gameSignin: vi.fn(),
+      cloudGetUserInfo: vi.fn().mockRejectedValue(
+        new Error('cloudGetUserInfo：登陆失效，需要重新登陆（HTTP 200，code=10004）'),
+      ),
+    }
+
+    const result = await runAttendance({
+      accountsSecret: JSON.stringify([
+        {
+          id: 'main',
+          name: '主账号',
+          uid: '1',
+          deviceId: 'device-1',
+          accessToken: 'stored-access',
+          refreshToken: 'old-main',
+          laohuToken: 'stale-laohu-token',
+          laohuUserId: 'laohu-user',
+          phone: '13800138000',
+        },
+      ]),
+      api,
+      accountPasswords: { main: 'secret-password' },
+      maxRetries: 1,
+    })
+
+    expect(api.cloudQueryWhetherSetPassword).toHaveBeenCalledWith('13800138000', 'device-1')
+    const error = result.accounts[0]?.cloudDuration?.error ?? ''
+    expect(error).toContain('用户名或密码错误')
+    expect(error).toContain('没有设置密码')
+    expect(error).toContain('TAYGEDO_PASSWORDS')
+  })
+
+  it('points at the rejected password when the laohu account already has one', async () => {
+    const api = {
+      refreshToken: vi.fn(),
+      loginWithPassword: vi.fn().mockRejectedValue(
+        new Error('loginWithPassword：用户名或密码错误（HTTP 200，code=1）'),
+      ),
+      cloudQueryWhetherSetPassword: vi.fn().mockResolvedValue({ havePwd: true }),
+      getGameRoles: vi.fn().mockResolvedValue({ roles: [] }),
+      appSignin: vi.fn().mockResolvedValue({ exp: 10, goldCoin: 20 }),
+      getSigninState: vi.fn(),
+      getSigninRewards: vi.fn(),
+      gameSignin: vi.fn(),
+      cloudGetUserInfo: vi.fn().mockRejectedValue(
+        new Error('cloudGetUserInfo：登陆失效，需要重新登陆（HTTP 200，code=10004）'),
+      ),
+    }
+
+    const result = await runAttendance({
+      accountsSecret: JSON.stringify([
+        {
+          id: 'main',
+          name: '主账号',
+          uid: '1',
+          deviceId: 'device-1',
+          accessToken: 'stored-access',
+          refreshToken: 'old-main',
+          laohuToken: 'stale-laohu-token',
+          laohuUserId: 'laohu-user',
+          phone: '13800138000',
+        },
+      ]),
+      api,
+      accountPasswords: { main: 'secret-password' },
+      maxRetries: 1,
+    })
+
+    const error = result.accounts[0]?.cloudDuration?.error ?? ''
+    expect(error).toContain('密码被拒绝')
+    expect(error).toContain('风控')
+  })
+
+  it('keeps the original login error when the password state probe fails', async () => {
+    const api = {
+      refreshToken: vi.fn(),
+      loginWithPassword: vi.fn().mockRejectedValue(
+        new Error('loginWithPassword：用户名或密码错误（HTTP 200，code=1）'),
+      ),
+      cloudQueryWhetherSetPassword: vi.fn().mockRejectedValue(new Error('query 失败')),
+      getGameRoles: vi.fn().mockResolvedValue({ roles: [] }),
+      appSignin: vi.fn().mockResolvedValue({ exp: 10, goldCoin: 20 }),
+      getSigninState: vi.fn(),
+      getSigninRewards: vi.fn(),
+      gameSignin: vi.fn(),
+      cloudGetUserInfo: vi.fn().mockRejectedValue(
+        new Error('cloudGetUserInfo：登陆失效，需要重新登陆（HTTP 200，code=10004）'),
+      ),
+    }
+
+    const result = await runAttendance({
+      accountsSecret: JSON.stringify([
+        {
+          id: 'main',
+          name: '主账号',
+          uid: '1',
+          deviceId: 'device-1',
+          accessToken: 'stored-access',
+          refreshToken: 'old-main',
+          laohuToken: 'stale-laohu-token',
+          laohuUserId: 'laohu-user',
+          phone: '13800138000',
+        },
+      ]),
+      api,
+      accountPasswords: { main: 'secret-password' },
+      maxRetries: 1,
+    })
+
+    const error = result.accounts[0]?.cloudDuration?.error ?? ''
+    expect(error).toContain('老虎登录失败')
+    expect(error).toContain('重新执行一次登录流程')
+    expect(error).not.toContain('没有设置密码')
+  })
+
   it('can disable cloud yihuan duration', async () => {
     const api = {
       refreshToken: vi.fn(),
