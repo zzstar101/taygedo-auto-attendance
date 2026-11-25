@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
@@ -35,8 +35,17 @@ describe('AccountStore implementations', () => {
 
     try {
       await store.writeAccounts('{"ok":true}')
+      expect(await readFile(path, 'utf8')).toBe('{"ok":true}\n')
 
-      expect((await stat(path)).mode & 0o777).toBe(0o600)
+      // Windows 不对 POSIX 权限位建模（chmod 只能切换只读标记），mode 断言只在类 Unix 平台有意义。
+      if (process.platform !== 'win32') {
+        expect((await stat(path)).mode & 0o777).toBe(0o600)
+
+        // 覆盖已有文件时也要收紧到 0600，而不只是新建时。
+        await writeFile(path, '{"ok":false}\n', { mode: 0o644 })
+        await store.writeAccounts('{"ok":true}')
+        expect((await stat(path)).mode & 0o777).toBe(0o600)
+      }
     }
     finally {
       await rm(dir, { recursive: true, force: true })
@@ -147,6 +156,53 @@ describe('StateStore implementations', () => {
     try {
       await expect(store.set('../outside', { ok: false })).rejects.toThrow('状态 key 包含非法路径片段')
       await expect(store.get('../outside')).rejects.toThrow('状态 key 包含非法路径片段')
+    }
+    finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('stores keys containing characters Windows forbids in file names', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'taygedo-state-colon-'))
+    const store = new FileStateStore(dir, 'prod')
+
+    try {
+      // 真实业务 key 形如 attendance:<accountId>:<YYYY-MM-DD>，冒号在 Windows 文件名里非法
+      await store.set('attendance:main:2026-11-25', { status: 'success' })
+      await store.set('attendance:alt:2026-11-25', { status: 'alt' })
+      await store.set('con', { reserved: true })
+      await store.set('trailing.', { trailing: true })
+
+      await expect(store.get('attendance:main:2026-11-25')).resolves.toEqual({ status: 'success' })
+      await expect(store.get('attendance:alt:2026-11-25')).resolves.toEqual({ status: 'alt' })
+      await expect(store.get('con')).resolves.toEqual({ reserved: true })
+      await expect(store.get('trailing.')).resolves.toEqual({ trailing: true })
+
+      const files = await readdir(join(dir, 'prod'))
+      expect(files).toContain('attendance%3Amain%3A2026-11-25.json')
+      expect(files).toContain('attendance%3Aalt%3A2026-11-25.json')
+      expect(files).toContain('_con.json')
+      expect(files).toContain('trailing%2E.json')
+    }
+    finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  // 旧版本直接把 key 当文件名（`attendance:main:...`），只有类 Unix 平台存在这种存量文件。
+  it.skipIf(process.platform === 'win32')('reads state written by older versions and migrates it on write', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'taygedo-state-legacy-'))
+    const legacyPath = join(dir, 'prod', 'attendance:main:2026-11-25.json')
+    const store = new FileStateStore(dir, 'prod')
+
+    try {
+      await mkdir(join(dir, 'prod'), { recursive: true })
+      await writeFile(legacyPath, JSON.stringify({ status: 'success' }), 'utf8')
+
+      await expect(store.get('attendance:main:2026-11-25')).resolves.toEqual({ status: 'success' })
+
+      await store.set('attendance:main:2026-11-25', { status: 'success' })
+      expect(await readdir(join(dir, 'prod'))).toEqual(['attendance%3Amain%3A2026-11-25.json'])
     }
     finally {
       await rm(dir, { recursive: true, force: true })

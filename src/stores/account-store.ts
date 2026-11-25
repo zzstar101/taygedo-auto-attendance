@@ -1,5 +1,6 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
+import { readTextFile } from '../utils/text.js'
 
 export interface AccountStore {
   readAccounts(): Promise<string>
@@ -30,12 +31,16 @@ export class FileAccountStore implements AccountStore {
   constructor(private readonly path: string) {}
 
   async readAccounts(): Promise<string> {
-    return (await readFile(this.path, 'utf8')).trim()
+    // Windows 上用记事本 / PowerShell 保存的账号文件可能带 BOM 或干脆是 UTF-16。
+    return (await readTextFile(this.path)).trim()
   }
 
   async writeAccounts(payload: string): Promise<void> {
     await mkdir(dirname(this.path), { recursive: true })
     await writeFile(this.path, `${payload}\n`, { encoding: 'utf8', mode: 0o600 })
+    // writeFile 的 mode 只在新建文件时生效，覆盖已有文件不会收紧权限，
+    // 所以补一次 chmod。Windows 上 chmod 只切换只读标记，失败也不影响写入。
+    await chmod(this.path, 0o600).catch(() => undefined)
   }
 }
 

@@ -1,12 +1,14 @@
-import { readFile, writeFile } from 'node:fs/promises'
 import { loadRuntimeConfig } from '../config/runtime.js'
 import { AttendanceService } from '../services/attendance-service.js'
 import { LoginService, type LoginServiceRunOptions } from '../services/login-service.js'
 import { createAccountStore, createStateStore } from '../stores/factory.js'
+import { FileAccountStore } from '../stores/account-store.js'
 import { loadOrCreateCredentialKey } from '../config/credentials.js'
 import { ensureAccountDevice } from '../taygedo/device.js'
 import { parseAccountsSecret } from '../config/accounts.js'
 import { runWithOptionalLoop } from './loop.js'
+import { isEntryModule } from '../utils/entry.js'
+import { readTextFile } from '../utils/text.js'
 
 interface LocalCliDependencies {
   service?: LocalCliService
@@ -81,6 +83,10 @@ function createDefaultService(): LocalCliService {
         TAYGEDO_ACCOUNT_STORE: process.env.TAYGEDO_ACCOUNT_STORE ?? 'file',
         TAYGEDO_STATE_STORE: process.env.TAYGEDO_STATE_STORE ?? 'file',
       })
+      // 少了这个参数只会读到空路径，报 `ENOENT: open ''`，完全看不出是哪个参数漏了。
+      if (config.accountStore === 'file' && !options.accountsFile) {
+        throw new Error('缺少必需参数 --accounts-file（TAYGEDO_ACCOUNT_STORE=file 需要账号文件路径）')
+      }
       const credentialKey = config.credentialKey ?? (config.credentialKeyPath
         ? await loadOrCreateCredentialKey(config.credentialKeyPath)
         : undefined)
@@ -112,7 +118,7 @@ function createDefaultService(): LocalCliService {
       await new LoginService().sendLoginCode(options)
     },
     async updateDevices(options) {
-      const payload = await readFile(options.accountsFile, 'utf8')
+      const payload = await readTextFile(options.accountsFile)
       const accounts = parseAccountsSecret(payload)
       const updatedAccounts = accounts.map(account => {
         if (options.accountId && account.id !== options.accountId) {
@@ -120,10 +126,11 @@ function createDefaultService(): LocalCliService {
         }
         return ensureAccountDevice(account, { force: options.force })
       })
-      const nextPayload = `${JSON.stringify(updatedAccounts, null, 2)}\n`
+      const nextPayload = JSON.stringify(updatedAccounts, null, 2)
       console.log(nextPayload.trim())
       if (!options.print) {
-        await writeFile(options.accountsFile, nextPayload, 'utf8')
+        // 走 FileAccountStore，账号文件才会带上 0600 权限（Windows 上 IDE 才不会提示明文凭据）。
+        await new FileAccountStore(options.accountsFile).writeAccounts(nextPayload)
       }
     },
   }
@@ -162,7 +169,7 @@ function optionalValue(value: string | undefined): string | undefined {
   return value
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isEntryModule(import.meta.url)) {
   runLocalCli().catch((error: unknown) => {
     console.error(error instanceof Error ? error.message : String(error))
     process.exitCode = 1

@@ -4,6 +4,7 @@ import { runAttendance, type RunnerDependencies } from './runner.js'
 import { GitHubFileAccountStore } from './stores/account-store.js'
 import { MemoryStateStore } from './stores/state-store.js'
 import { AttendanceService } from './services/attendance-service.js'
+import { isEntryModule } from './utils/entry.js'
 
 interface ActionOptions {
   env?: Record<string, string | undefined>
@@ -54,7 +55,7 @@ export async function runAction(options: ActionOptions = {}): Promise<void> {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isEntryModule(import.meta.url)) {
   runAction().catch((error: unknown) => {
     console.error(error instanceof Error ? error.message : String(error))
     process.exitCode = 1

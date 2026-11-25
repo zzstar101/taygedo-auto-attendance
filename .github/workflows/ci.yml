@@ -39,3 +39,62 @@ jobs:
 
       - name: Docker build smoke test
         run: docker build -t taygedo-auto-attendance:ci .
+
+  verify-windows:
+    # 本地 CLI、文件状态存储、青龙脚本都有人在 Windows 上用，单独跑一遍防回归
+    # （路径分隔符、文件名非法字符、文本编码、入口判断都只在 Windows 上才暴露）。
+    if: github.repository == 'zzstar101/taygedo-auto-attendance'
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.32.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+  smoke-windows:
+    # 两段式：先让上面的 test/build 跑通，再验证 Worker 与云函数打包。
+    # 分开的好处是环境类问题不会和打包类问题混在同一个失败里，定位更快。
+    needs: verify-windows
+    if: github.repository == 'zzstar101/taygedo-auto-attendance'
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.32.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Cloudflare Worker build smoke test
+        run: pnpm worker:build
+
+      - name: Cloud function build smoke test
+        run: pnpm cloud:function:build

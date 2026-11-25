@@ -29,6 +29,22 @@ describe('scheduled attendance time', () => {
     expect(dockerWorkflow).toContain("if: github.repository == 'zzstar101/taygedo-auto-attendance'")
   })
 
+  it('runs the test suite on Windows as well as Linux', () => {
+    const ciWorkflow = readFileSync('.github/workflows/ci.yml', 'utf8')
+
+    expect(ciWorkflow).toContain('runs-on: ubuntu-latest')
+    expect(ciWorkflow).toContain('runs-on: windows-latest')
+  })
+
+  it('runs Windows smoke tests only after the Windows verify job', () => {
+    const ciWorkflow = readFileSync('.github/workflows/ci.yml', 'utf8')
+
+    expect(ciWorkflow).toContain('smoke-windows:')
+    expect(ciWorkflow).toContain('needs: verify-windows')
+    expect(ciWorkflow).toContain('name: Cloudflare Worker build smoke test')
+    expect(ciWorkflow).toContain('name: Cloud function build smoke test')
+  })
+
   it('keeps scheduled workflows active without empty commits', () => {
     const workflow = readFileSync('.github/workflows/attendance.yml', 'utf8')
 

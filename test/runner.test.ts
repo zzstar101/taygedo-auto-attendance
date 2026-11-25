@@ -1,7 +1,10 @@
+import { mkdtemp, readdir, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { runAttendance } from '../src/runner.js'
 import { encryptPassword } from '../src/config/credentials.js'
-import { MemoryStateStore } from '../src/stores/state-store.js'
+import { FileStateStore, MemoryStateStore } from '../src/stores/state-store.js'
 import { TaygedoApi } from '../src/taygedo/api.js'
 
 describe('runAttendance', () => {
@@ -689,6 +692,182 @@ describe('runAttendance', () => {
     expect(result.summary).toContain('云异环时长：+15 分钟，剩余 120 分钟')
   })
 
+  it('refreshes an expired laohu token and retries cloud yihuan duration', async () => {
+    const secretWriter = vi.fn()
+    const api = {
+      refreshToken: vi.fn(),
+      loginWithPassword: vi.fn().mockResolvedValue({ token: 'fresh-laohu-token', userId: 'laohu-user' }),
+      getGameRoles: vi.fn().mockResolvedValue({ roles: [] }),
+      appSignin: vi.fn().mockResolvedValue({ exp: 10, goldCoin: 20 }),
+      getSigninState: vi.fn(),
+      getSigninRewards: vi.fn(),
+      gameSignin: vi.fn(),
+      cloudGetUserInfo: vi.fn()
+        .mockRejectedValueOnce(new Error('cloudGetUserInfo：登陆失效，需要重新登陆（HTTP 200，code=10004）'))
+        .mockResolvedValueOnce({ gave: 15, remained: 120 }),
+    }
+
+    const result = await runAttendance({
+      accountsSecret: JSON.stringify([
+        {
+          id: 'main',
+          name: '主账号',
+          uid: '1',
+          deviceId: 'device-1',
+          accessToken: 'stored-access',
+          refreshToken: 'old-main',
+          laohuToken: 'stale-laohu-token',
+          laohuUserId: 'laohu-user',
+          phone: '13800138000',
+        },
+      ]),
+      api,
+      accountPasswords: { main: 'secret-password' },
+      maxRetries: 1,
+      secretWriter,
+    })
+
+    expect(api.loginWithPassword).toHaveBeenCalledWith('13800138000', 'secret-password', 'device-1', {
+      openudid: undefined,
+      vendorid: undefined,
+    })
+    expect(api.cloudGetUserInfo).toHaveBeenNthCalledWith(1, 'stale-laohu-token', 'laohu-user', 'device-1')
+    expect(api.cloudGetUserInfo).toHaveBeenNthCalledWith(2, 'fresh-laohu-token', 'laohu-user', 'device-1')
+    expect(result.accounts[0]?.cloudDuration).toEqual({
+      status: 'success',
+      gave: 15,
+      remained: 120,
+    })
+    expect(result.updatedAccounts[0]).toEqual(expect.objectContaining({
+      laohuToken: 'fresh-laohu-token',
+      laohuUserId: 'laohu-user',
+    }))
+    expect(secretWriter).toHaveBeenCalledWith(JSON.stringify(result.updatedAccounts, null, 2))
+    expect(result.summary).toContain('云异环时长：+15 分钟，剩余 120 分钟')
+  })
+
+  it('persists the refreshed laohu token even when the retry still fails', async () => {
+    const secretWriter = vi.fn()
+    const api = {
+      refreshToken: vi.fn(),
+      loginWithPassword: vi.fn().mockResolvedValue({ token: 'fresh-laohu-token', userId: 'laohu-user' }),
+      getGameRoles: vi.fn().mockResolvedValue({ roles: [] }),
+      appSignin: vi.fn().mockResolvedValue({ exp: 10, goldCoin: 20 }),
+      getSigninState: vi.fn(),
+      getSigninRewards: vi.fn(),
+      gameSignin: vi.fn(),
+      cloudGetUserInfo: vi.fn()
+        .mockRejectedValueOnce(new Error('cloudGetUserInfo：登陆失效，需要重新登陆（HTTP 200，code=10004）'))
+        .mockRejectedValueOnce(new Error('cloudGetUserInfo：系统繁忙（HTTP 200，code=1）')),
+    }
+
+    const result = await runAttendance({
+      accountsSecret: JSON.stringify([
+        {
+          id: 'main',
+          name: '主账号',
+          uid: '1',
+          deviceId: 'device-1',
+          accessToken: 'stored-access',
+          refreshToken: 'old-main',
+          laohuToken: 'stale-laohu-token',
+          laohuUserId: 'laohu-user',
+          phone: '13800138000',
+        },
+      ]),
+      api,
+      accountPasswords: { main: 'secret-password' },
+      maxRetries: 1,
+      secretWriter,
+    })
+
+    expect(result.accounts[0]?.cloudDuration).toEqual({
+      status: 'failed',
+      error: 'cloudGetUserInfo：系统繁忙（HTTP 200，code=1）',
+    })
+    expect(result.updatedAccounts[0]).toEqual(expect.objectContaining({
+      laohuToken: 'fresh-laohu-token',
+    }))
+    expect(secretWriter).toHaveBeenCalled()
+  })
+
+  it('explains how to fix an expired laohu token when no password is available', async () => {
+    const api = {
+      refreshToken: vi.fn(),
+      getGameRoles: vi.fn().mockResolvedValue({ roles: [] }),
+      appSignin: vi.fn().mockResolvedValue({ exp: 10, goldCoin: 20 }),
+      getSigninState: vi.fn(),
+      getSigninRewards: vi.fn(),
+      gameSignin: vi.fn(),
+      cloudGetUserInfo: vi.fn().mockRejectedValue(
+        new Error('cloudGetUserInfo：登陆失效，需要重新登陆（HTTP 200，code=10004）'),
+      ),
+    }
+
+    const result = await runAttendance({
+      accountsSecret: JSON.stringify([
+        {
+          id: 'main',
+          name: '主账号',
+          uid: '1',
+          deviceId: 'device-1',
+          accessToken: 'stored-access',
+          refreshToken: 'old-main',
+          laohuToken: 'stale-laohu-token',
+          laohuUserId: 'laohu-user',
+        },
+      ]),
+      api,
+      maxRetries: 1,
+    })
+
+    expect(api.cloudGetUserInfo).toHaveBeenCalledTimes(1)
+    const cloudDuration = result.accounts[0]?.cloudDuration
+    expect(cloudDuration?.status).toBe('failed')
+    expect(cloudDuration?.error).toContain('laohuToken 已过期')
+    expect(result.summary).toContain('云异环时长：失败')
+  })
+
+  it('does not retry cloud yihuan duration on unrelated failures', async () => {
+    const loginWithPassword = vi.fn()
+    const api = {
+      refreshToken: vi.fn(),
+      loginWithPassword,
+      getGameRoles: vi.fn().mockResolvedValue({ roles: [] }),
+      appSignin: vi.fn().mockResolvedValue({ exp: 10, goldCoin: 20 }),
+      getSigninState: vi.fn(),
+      getSigninRewards: vi.fn(),
+      gameSignin: vi.fn(),
+      cloudGetUserInfo: vi.fn().mockRejectedValue(new Error('cloudGetUserInfo：系统繁忙（HTTP 500，code=-1）')),
+    }
+
+    const result = await runAttendance({
+      accountsSecret: JSON.stringify([
+        {
+          id: 'main',
+          name: '主账号',
+          uid: '1',
+          deviceId: 'device-1',
+          accessToken: 'stored-access',
+          refreshToken: 'old-main',
+          laohuToken: 'laohu-token',
+          laohuUserId: 'laohu-user',
+          phone: '13800138000',
+        },
+      ]),
+      api,
+      accountPasswords: { main: 'secret-password' },
+      maxRetries: 1,
+    })
+
+    expect(loginWithPassword).not.toHaveBeenCalled()
+    expect(api.cloudGetUserInfo).toHaveBeenCalledTimes(1)
+    expect(result.accounts[0]?.cloudDuration).toEqual({
+      status: 'failed',
+      error: 'cloudGetUserInfo：系统繁忙（HTTP 500，code=-1）',
+    })
+  })
+
   it('can disable cloud yihuan duration', async () => {
     const api = {
       refreshToken: vi.fn(),
@@ -850,6 +1029,48 @@ describe('runAttendance', () => {
 
     expect(result.successCount).toBe(1)
     expect(result.summary).toContain('游戏 1256 / 幻塔A：今日已签到，本月第 1 天，奖励 墨晶 x5')
+  })
+
+  it('persists attendance state with a file store for colon-separated keys', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'taygedo-runner-state-'))
+    const api = {
+      refreshToken: vi.fn(),
+      getGameRoles: vi.fn().mockResolvedValue({ roles: [] }),
+      appSignin: vi.fn().mockResolvedValue({ exp: 10, goldCoin: 20 }),
+      getSigninState: vi.fn(),
+      getSigninRewards: vi.fn(),
+      gameSignin: vi.fn(),
+    }
+    const options = {
+      accountsSecret: JSON.stringify([
+        {
+          id: 'main',
+          name: '主账号',
+          uid: '1',
+          deviceId: 'device-1',
+          accessToken: 'stored-access',
+          refreshToken: 'old-main',
+        },
+      ]),
+      api,
+      stateStore: new FileStateStore(dir, 'prod'),
+      coinTasks: false,
+      cloudDuration: false,
+      maxRetries: 1,
+      now: shanghaiNoon,
+    }
+
+    try {
+      const first = await runAttendance(options)
+      expect(first.successCount).toBe(1)
+      expect(await readdir(join(dir, 'prod'))).toContain('attendance%3Amain%3A2026-05-26.json')
+
+      const second = await runAttendance(options)
+      expect(second.accounts[0]?.status).toBe('skipped')
+    }
+    finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 
   it('skips accounts that already succeeded today in state storage', async () => {

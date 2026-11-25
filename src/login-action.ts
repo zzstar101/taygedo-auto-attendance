@@ -1,11 +1,11 @@
-import { writeFile } from 'node:fs/promises'
-import { mkdir } from 'node:fs/promises'
+import { chmod, mkdir, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { TaygedoApi, type BindRoleResponse, type LoginWithCaptchaResponse, type UserCenterLoginResponse } from './taygedo/api.js'
 import { parseAccountsSecret, type TaygedoAccount } from './config/accounts.js'
 import { encryptPassword, generateCredentialKey } from './config/credentials.js'
 import { generateDeviceIdentity, type DeviceIdentity } from './taygedo/device.js'
 import { shanghaiDateTime } from './utils/time.js'
+import { isEntryModule } from './utils/entry.js'
 
 export interface LoginActionDependencies {
   env?: Record<string, string | undefined>
@@ -153,7 +153,9 @@ function upsertAccount(accounts: TaygedoAccount[], nextAccount: TaygedoAccount):
 
 async function writeTextFile(path: string, content: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true })
-  await writeFile(path, content, 'utf8')
+  // accounts.json / credential-key 都是敏感文件，避免被同机其他用户读到（Windows 上 chmod 无副作用）。
+  await writeFile(path, content, { encoding: 'utf8', mode: 0o600 })
+  await chmod(path, 0o600).catch(() => undefined)
 }
 
 function requireEnv(env: Record<string, string | undefined>, key: string): string {
@@ -211,7 +213,7 @@ function parseBoolean(value: string | undefined): boolean {
   return value ? ['1', 'true', 'yes', 'on'].includes(value.toLowerCase()) : false
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isEntryModule(import.meta.url)) {
   runLoginAction().catch((error: unknown) => {
     console.error(error instanceof Error ? error.message : String(error))
     process.exitCode = 1

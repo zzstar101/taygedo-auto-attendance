@@ -1,5 +1,5 @@
 import { parseAccountsSecret, type TaygedoAccount } from './config/accounts.js'
-import { TaygedoApi } from './taygedo/api.js'
+import { isLaohuSessionExpiredError, TaygedoApi, type CloudDurationResponse } from './taygedo/api.js'
 import { sendNotification } from './notify.js'
 import { withRetries } from './utils/retry.js'
 import { TAYGEDO_GAME_IDS } from './taygedo/games.js'
@@ -563,72 +563,108 @@ async function runCloudDuration(
   if (!api.cloudGetUserInfo) {
     return undefined
   }
-  let laohuToken = account.laohuToken
-  let laohuUserId = account.laohuUserId
+  const cloudGetUserInfo = api.cloudGetUserInfo
+  const loginWithPassword = api.loginWithPassword
   let updatedAccount: TaygedoAccount | undefined
 
-  if (!laohuToken || !laohuUserId) {
+  const respond = (summary: CloudDurationSummary) => ({
+    summary,
+    ...(updatedAccount ? { updatedAccount, shouldUpdateSecret: true } : {}),
+  })
+
+  // 云异环只认老虎 token，refreshToken 无法续期：token 过期（code=10004）时
+  // 只能用手机号 + 密码重新登录一次换个新 token。
+  const reloginLaohu = async (): Promise<LaohuCredentials | undefined> => {
+    const phone = account.phone
     const password = resolveAccountPassword(account, accountPasswords, credentialKey)
-    if (!account.phone || !password || !api.loginWithPassword) {
-      return {
-        summary: {
-          status: 'skipped',
-          skippedReason: '账号缺少 laohuToken/laohuUserId',
-        },
-      }
+    if (!phone || !password || !loginWithPassword) {
+      return undefined
     }
-    try {
-      const login = await api.loginWithPassword(account.phone, password, account.deviceId, {
-        openudid: account.openudid,
-        vendorid: account.vendorid,
-      })
-      laohuToken = login.token
-      laohuUserId = login.userId
-      updatedAccount = {
-        ...account,
-        laohuToken,
-        laohuUserId,
-        tokenUpdatedAt: shanghaiDateTime(),
-      }
+    const login = await loginWithPassword(phone, password, account.deviceId, {
+      openudid: account.openudid,
+      vendorid: account.vendorid,
+    })
+    updatedAccount = {
+      ...account,
+      laohuToken: login.token,
+      laohuUserId: login.userId,
+      tokenUpdatedAt: shanghaiDateTime(),
     }
-    catch (error) {
-      return {
-        summary: {
-          status: 'failed',
-          error: `老虎登录失败：${errorMessage(error)}`,
-        },
-      }
-    }
+    return { token: login.token, userId: login.userId }
   }
 
-  if (!laohuToken || !laohuUserId) {
-    return {
-      summary: {
-      status: 'skipped',
-      skippedReason: '账号缺少 laohuToken/laohuUserId',
-      },
+  let credentials: LaohuCredentials | undefined = account.laohuToken && account.laohuUserId
+    ? { token: account.laohuToken, userId: account.laohuUserId }
+    : undefined
+
+  if (!credentials) {
+    try {
+      credentials = await reloginLaohu()
+    }
+    catch (error) {
+      return respond({
+        status: 'failed',
+        error: `老虎登录失败：${errorMessage(error)}`,
+      })
+    }
+    if (!credentials) {
+      return respond({
+        status: 'skipped',
+        skippedReason: '账号缺少 laohuToken/laohuUserId',
+      })
     }
   }
 
   try {
-    const result = await api.cloudGetUserInfo(laohuToken, laohuUserId, account.deviceId)
-    return {
-      summary: {
-        status: 'success',
-        gave: result.gave,
-        ...(result.remained === undefined ? {} : { remained: result.remained }),
-      },
-      ...(updatedAccount ? { updatedAccount, shouldUpdateSecret: true } : {}),
-    }
+    return respond(toCloudDurationSummary(await cloudGetUserInfo(credentials.token, credentials.userId, account.deviceId)))
   }
   catch (error) {
-    return {
-      summary: {
+    if (!isLaohuSessionExpiredError(error)) {
+      return respond({
         status: 'failed',
         error: errorMessage(error),
-      },
-      ...(updatedAccount ? { updatedAccount, shouldUpdateSecret: true } : {}),
+      })
     }
+
+    let refreshed: LaohuCredentials | undefined
+    try {
+      refreshed = await reloginLaohu()
+    }
+    catch (loginError) {
+      return respond({
+        status: 'failed',
+        error: `老虎登录失败：${errorMessage(loginError)}`,
+      })
+    }
+    if (!refreshed) {
+      return respond({
+        status: 'failed',
+        error: `${errorMessage(error)}；laohuToken 已过期，请重新执行登录流程（或手动更新 laohuToken/laohuUserId），也可以补充手机号和密码以便之后自动重新登录`,
+      })
+    }
+
+    try {
+      return respond(toCloudDurationSummary(await cloudGetUserInfo(refreshed.token, refreshed.userId, account.deviceId)))
+    }
+    catch (retryError) {
+      return respond({
+        status: 'failed',
+        error: errorMessage(retryError),
+      })
+    }
+  }
+}
+
+interface LaohuCredentials {
+  token: string
+  userId: string
+}
+
+function toCloudDurationSummary(result: CloudDurationResponse): CloudDurationSummary {
+  return {
+    status: 'success',
+    gave: result.gave,
+    ...(result.remained === undefined ? {} : { remained: result.remained }),
   }
 }
 

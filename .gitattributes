@@ -1,0 +1,5 @@
+* text=auto
+
+# shell 脚本必须保持 LF：Windows 上 core.autocrlf 会改成 CRLF，
+# 带到 Linux（青龙面板 / WSL / 容器）执行时会报 `$'\r': command not found`。
+*.sh text eol=lf
