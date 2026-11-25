@@ -1,6 +1,6 @@
-import { readFile } from 'node:fs/promises'
 import type { LoginActionDependencies } from '../login-action.js'
 import { runLoginAction } from '../login-action.js'
+import { readTextFile } from '../utils/text.js'
 
 export interface LoginServiceRunOptions {
   mode: string
@@ -51,7 +51,7 @@ export class LoginService {
 
 async function tryReadFile(path: string): Promise<string | undefined> {
   try {
-    return await readFile(path, 'utf8')
+    return await readTextFile(path)
   }
   catch (error) {
     if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {

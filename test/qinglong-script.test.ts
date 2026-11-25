@@ -1,8 +1,18 @@
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { describe, expect, it } from 'vitest'
+
+// 青龙面板是 Linux 环境，脚本本身依赖 bash；Windows 上没有 Git Bash 时跳过需要执行脚本的用例。
+const bashAvailable = (() => {
+  try {
+    return spawnSync('bash', ['-c', 'exit 0'], { stdio: 'ignore' }).status === 0
+  }
+  catch {
+    return false
+  }
+})()
 
 describe('qinglong script', () => {
   it('includes Qinglong task metadata for auto discovery', async () => {
@@ -12,7 +22,7 @@ describe('qinglong script', () => {
     expect(script).toContain('cron: 15 1 * * *')
   })
 
-  it('initializes accounts from env and runs local CLI commands', async () => {
+  it.runIf(bashAvailable)('initializes accounts from env and runs local CLI commands', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'taygedo-ql-'))
     const accounts = JSON.stringify([
       {
@@ -39,7 +49,7 @@ describe('qinglong script', () => {
     }
   }, 20000)
 
-  it('prints a Qinglong-friendly setup hint when accounts file is missing', async () => {
+  it.runIf(bashAvailable)('prints a Qinglong-friendly setup hint when accounts file is missing', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'taygedo-ql-'))
 
     try {

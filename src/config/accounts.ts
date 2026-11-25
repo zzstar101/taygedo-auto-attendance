@@ -1,4 +1,5 @@
 import type { EncryptedPassword } from './credentials.js'
+import { stripBom } from '../utils/text.js'
 
 export interface TaygedoAccount {
   id: string
@@ -19,7 +20,9 @@ export interface TaygedoAccount {
 }
 
 export function parseAccountsSecret(secret: string): TaygedoAccount[] {
-  const parsed = JSON.parse(secret) as unknown
+  // Windows 下用记事本或 PowerShell 保存的账号文件常带 BOM，JSON.parse 会直接报
+  // `Unexpected token`，这里先清掉 BOM 再做解析。
+  const parsed = parseJson(stripBom(secret).trim()) as unknown
   if (!Array.isArray(parsed)) {
     throw new Error('TAYGEDO_ACCOUNTS 必须是 JSON 数组')
   }
@@ -123,6 +126,20 @@ function assignOptionalEncryptedPassword(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function parseJson(text: string): unknown {
+  try {
+    return JSON.parse(text)
+  }
+  catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    // 文件里出现 \u0000 基本可以确定是 UTF-16 存储被当成 UTF-8 读了。
+    const hint = text.includes('\u0000')
+      ? '；文件看起来是 UTF-16 编码，请另存为 UTF-8（或直接用本工具写入）'
+      : ''
+    throw new Error(`TAYGEDO_ACCOUNTS 不是合法的 JSON：${reason}${hint}`)
+  }
 }
 
 function requireString(

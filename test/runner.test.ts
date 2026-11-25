@@ -1,8 +1,19 @@
+import { mkdtemp, readdir, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { runAttendance } from '../src/runner.js'
 import { encryptPassword } from '../src/config/credentials.js'
-import { MemoryStateStore } from '../src/stores/state-store.js'
+import { FileStateStore, MemoryStateStore, type StateStore } from '../src/stores/state-store.js'
+import { EnvAccountStore } from '../src/stores/account-store.js'
+import { AttendanceService } from '../src/services/attendance-service.js'
 import { TaygedoApi } from '../src/taygedo/api.js'
+
+/** 写回的账号配置：解析后比较（JSON 字段顺序不影响结果）。 */
+function writtenAccounts(secretWriter: ReturnType<typeof vi.fn>): unknown {
+  expect(secretWriter).toHaveBeenCalledTimes(1)
+  return JSON.parse(String(secretWriter.mock.calls.at(-1)?.[0]))
+}
 
 describe('runAttendance', () => {
   const shanghaiNoon = new Date('2026-05-26T04:00:00.000Z')
@@ -63,7 +74,7 @@ describe('runAttendance', () => {
         refreshToken: 'old-alt',
       },
     ])
-    expect(secretWriter).toHaveBeenCalledWith(JSON.stringify(result.updatedAccounts, null, 2))
+    expect(writtenAccounts(secretWriter)).toEqual(result.updatedAccounts)
   })
 
   it('does not write the secret when every account fails before refresh completes', async () => {
@@ -264,7 +275,7 @@ describe('runAttendance', () => {
       refreshToken: 'new-refresh',
       tokenUpdatedAt: expect.any(String),
     }))
-    expect(secretWriter).toHaveBeenCalledWith(JSON.stringify(result.updatedAccounts, null, 2))
+    expect(writtenAccounts(secretWriter)).toEqual(result.updatedAccounts)
   })
 
   it('rebuilds the usercenter session from laohu credentials when refresh is rejected', async () => {
@@ -305,7 +316,7 @@ describe('runAttendance', () => {
       laohuUserId: 'laohu-user',
       tokenUpdatedAt: expect.any(String),
     }))
-    expect(secretWriter).toHaveBeenCalledWith(JSON.stringify(result.updatedAccounts, null, 2))
+    expect(writtenAccounts(secretWriter)).toEqual(result.updatedAccounts)
   })
 
   it('uses an environment password before refresh when the stored accessToken is rejected', async () => {
@@ -355,7 +366,7 @@ describe('runAttendance', () => {
       phone: '13800138000',
       tokenUpdatedAt: expect.any(String),
     }))
-    expect(secretWriter).toHaveBeenCalledWith(JSON.stringify(result.updatedAccounts, null, 2))
+    expect(writtenAccounts(secretWriter)).toEqual(result.updatedAccounts)
   })
 
   it('uses an encrypted account password before refresh when a credential key is configured', async () => {
@@ -685,8 +696,184 @@ describe('runAttendance', () => {
       laohuUserId: 'new-laohu-user',
       tokenUpdatedAt: expect.any(String),
     }))
-    expect(secretWriter).toHaveBeenCalledWith(JSON.stringify(result.updatedAccounts, null, 2))
+    expect(writtenAccounts(secretWriter)).toEqual(result.updatedAccounts)
     expect(result.summary).toContain('云异环时长：+15 分钟，剩余 120 分钟')
+  })
+
+  it('refreshes an expired laohu token and retries cloud yihuan duration', async () => {
+    const secretWriter = vi.fn()
+    const api = {
+      refreshToken: vi.fn(),
+      loginWithPassword: vi.fn().mockResolvedValue({ token: 'fresh-laohu-token', userId: 'laohu-user' }),
+      getGameRoles: vi.fn().mockResolvedValue({ roles: [] }),
+      appSignin: vi.fn().mockResolvedValue({ exp: 10, goldCoin: 20 }),
+      getSigninState: vi.fn(),
+      getSigninRewards: vi.fn(),
+      gameSignin: vi.fn(),
+      cloudGetUserInfo: vi.fn()
+        .mockRejectedValueOnce(new Error('cloudGetUserInfo：登陆失效，需要重新登陆（HTTP 200，code=10004）'))
+        .mockResolvedValueOnce({ gave: 15, remained: 120 }),
+    }
+
+    const result = await runAttendance({
+      accountsSecret: JSON.stringify([
+        {
+          id: 'main',
+          name: '主账号',
+          uid: '1',
+          deviceId: 'device-1',
+          accessToken: 'stored-access',
+          refreshToken: 'old-main',
+          laohuToken: 'stale-laohu-token',
+          laohuUserId: 'laohu-user',
+          phone: '13800138000',
+        },
+      ]),
+      api,
+      accountPasswords: { main: 'secret-password' },
+      maxRetries: 1,
+      secretWriter,
+    })
+
+    expect(api.loginWithPassword).toHaveBeenCalledWith('13800138000', 'secret-password', 'device-1', {
+      openudid: undefined,
+      vendorid: undefined,
+    })
+    expect(api.cloudGetUserInfo).toHaveBeenNthCalledWith(1, 'stale-laohu-token', 'laohu-user', 'device-1')
+    expect(api.cloudGetUserInfo).toHaveBeenNthCalledWith(2, 'fresh-laohu-token', 'laohu-user', 'device-1')
+    expect(result.accounts[0]?.cloudDuration).toEqual({
+      status: 'success',
+      gave: 15,
+      remained: 120,
+    })
+    expect(result.updatedAccounts[0]).toEqual(expect.objectContaining({
+      laohuToken: 'fresh-laohu-token',
+      laohuUserId: 'laohu-user',
+    }))
+    expect(writtenAccounts(secretWriter)).toEqual(result.updatedAccounts)
+    expect(result.summary).toContain('云异环时长：+15 分钟，剩余 120 分钟')
+  })
+
+  it('persists the refreshed laohu token even when the retry still fails', async () => {
+    const secretWriter = vi.fn()
+    const api = {
+      refreshToken: vi.fn(),
+      loginWithPassword: vi.fn().mockResolvedValue({ token: 'fresh-laohu-token', userId: 'laohu-user' }),
+      getGameRoles: vi.fn().mockResolvedValue({ roles: [] }),
+      appSignin: vi.fn().mockResolvedValue({ exp: 10, goldCoin: 20 }),
+      getSigninState: vi.fn(),
+      getSigninRewards: vi.fn(),
+      gameSignin: vi.fn(),
+      cloudGetUserInfo: vi.fn()
+        .mockRejectedValueOnce(new Error('cloudGetUserInfo：登陆失效，需要重新登陆（HTTP 200，code=10004）'))
+        .mockRejectedValueOnce(new Error('cloudGetUserInfo：系统繁忙（HTTP 200，code=1）')),
+    }
+
+    const result = await runAttendance({
+      accountsSecret: JSON.stringify([
+        {
+          id: 'main',
+          name: '主账号',
+          uid: '1',
+          deviceId: 'device-1',
+          accessToken: 'stored-access',
+          refreshToken: 'old-main',
+          laohuToken: 'stale-laohu-token',
+          laohuUserId: 'laohu-user',
+          phone: '13800138000',
+        },
+      ]),
+      api,
+      accountPasswords: { main: 'secret-password' },
+      maxRetries: 1,
+      secretWriter,
+    })
+
+    expect(result.accounts[0]?.cloudDuration).toEqual({
+      status: 'failed',
+      error: 'cloudGetUserInfo：系统繁忙（HTTP 200，code=1）',
+    })
+    expect(result.updatedAccounts[0]).toEqual(expect.objectContaining({
+      laohuToken: 'fresh-laohu-token',
+    }))
+    expect(secretWriter).toHaveBeenCalled()
+  })
+
+  it('explains how to fix an expired laohu token when no password is available', async () => {
+    const api = {
+      refreshToken: vi.fn(),
+      getGameRoles: vi.fn().mockResolvedValue({ roles: [] }),
+      appSignin: vi.fn().mockResolvedValue({ exp: 10, goldCoin: 20 }),
+      getSigninState: vi.fn(),
+      getSigninRewards: vi.fn(),
+      gameSignin: vi.fn(),
+      cloudGetUserInfo: vi.fn().mockRejectedValue(
+        new Error('cloudGetUserInfo：登陆失效，需要重新登陆（HTTP 200，code=10004）'),
+      ),
+    }
+
+    const result = await runAttendance({
+      accountsSecret: JSON.stringify([
+        {
+          id: 'main',
+          name: '主账号',
+          uid: '1',
+          deviceId: 'device-1',
+          accessToken: 'stored-access',
+          refreshToken: 'old-main',
+          laohuToken: 'stale-laohu-token',
+          laohuUserId: 'laohu-user',
+        },
+      ]),
+      api,
+      maxRetries: 1,
+    })
+
+    expect(api.cloudGetUserInfo).toHaveBeenCalledTimes(1)
+    const cloudDuration = result.accounts[0]?.cloudDuration
+    expect(cloudDuration?.status).toBe('failed')
+    expect(cloudDuration?.error).toContain('laohuToken 已过期')
+    expect(result.summary).toContain('云异环时长：失败')
+  })
+
+  it('does not retry cloud yihuan duration on unrelated failures', async () => {
+    const loginWithPassword = vi.fn()
+    const api = {
+      refreshToken: vi.fn(),
+      loginWithPassword,
+      getGameRoles: vi.fn().mockResolvedValue({ roles: [] }),
+      appSignin: vi.fn().mockResolvedValue({ exp: 10, goldCoin: 20 }),
+      getSigninState: vi.fn(),
+      getSigninRewards: vi.fn(),
+      gameSignin: vi.fn(),
+      cloudGetUserInfo: vi.fn().mockRejectedValue(new Error('cloudGetUserInfo：系统繁忙（HTTP 500，code=-1）')),
+    }
+
+    const result = await runAttendance({
+      accountsSecret: JSON.stringify([
+        {
+          id: 'main',
+          name: '主账号',
+          uid: '1',
+          deviceId: 'device-1',
+          accessToken: 'stored-access',
+          refreshToken: 'old-main',
+          laohuToken: 'laohu-token',
+          laohuUserId: 'laohu-user',
+          phone: '13800138000',
+        },
+      ]),
+      api,
+      accountPasswords: { main: 'secret-password' },
+      maxRetries: 1,
+    })
+
+    expect(loginWithPassword).not.toHaveBeenCalled()
+    expect(api.cloudGetUserInfo).toHaveBeenCalledTimes(1)
+    expect(result.accounts[0]?.cloudDuration).toEqual({
+      status: 'failed',
+      error: 'cloudGetUserInfo：系统繁忙（HTTP 500，code=-1）',
+    })
   })
 
   it('can disable cloud yihuan duration', async () => {
@@ -850,6 +1037,48 @@ describe('runAttendance', () => {
 
     expect(result.successCount).toBe(1)
     expect(result.summary).toContain('游戏 1256 / 幻塔A：今日已签到，本月第 1 天，奖励 墨晶 x5')
+  })
+
+  it('persists attendance state with a file store for colon-separated keys', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'taygedo-runner-state-'))
+    const api = {
+      refreshToken: vi.fn(),
+      getGameRoles: vi.fn().mockResolvedValue({ roles: [] }),
+      appSignin: vi.fn().mockResolvedValue({ exp: 10, goldCoin: 20 }),
+      getSigninState: vi.fn(),
+      getSigninRewards: vi.fn(),
+      gameSignin: vi.fn(),
+    }
+    const options = {
+      accountsSecret: JSON.stringify([
+        {
+          id: 'main',
+          name: '主账号',
+          uid: '1',
+          deviceId: 'device-1',
+          accessToken: 'stored-access',
+          refreshToken: 'old-main',
+        },
+      ]),
+      api,
+      stateStore: new FileStateStore(dir, 'prod'),
+      coinTasks: false,
+      cloudDuration: false,
+      maxRetries: 1,
+      now: shanghaiNoon,
+    }
+
+    try {
+      const first = await runAttendance(options)
+      expect(first.successCount).toBe(1)
+      expect(await readdir(join(dir, 'prod', 'v2'))).toContain('k-attendance%3amain%3a2026-05-26.json')
+
+      const second = await runAttendance(options)
+      expect(second.accounts[0]?.status).toBe('skipped')
+    }
+    finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 
   it('skips accounts that already succeeded today in state storage', async () => {
@@ -1279,3 +1508,411 @@ function mockGameRolesAfterAuthExpired() {
         : [],
     }))
 }
+
+describe('runAttendance with a real TaygedoApi instance', () => {
+  const laohuAccount = {
+    id: 'main',
+    name: '主账号',
+    uid: '1',
+    deviceId: 'device-1',
+    accessToken: 'stored-access',
+    refreshToken: 'old-main',
+  }
+
+  /** 按 URL 分发的 fetch：老虎登录 + 云异环 getUserInfo。 */
+  function createLaohuFetch(options: { expireFirst?: boolean } = {}) {
+    let cloudCalls = 0
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/openApi/secureLogin')) {
+        return jsonResponse({ code: 0, result: { token: 'fresh-laohu-token', userId: 'laohu-user' } })
+      }
+      if (url.includes('/cloud/game/getUserInfo')) {
+        cloudCalls += 1
+        if (options.expireFirst && cloudCalls === 1) {
+          return jsonResponse({ code: 10004, msg: '登陆失效，需要重新登陆' })
+        }
+        return jsonResponse({ code: 0, result: { perDayFirstLoginGiveDuration: 15, remainedDuration: 120 } })
+      }
+      throw new Error(`未预期的请求：${url}`)
+    })
+    return { fetchMock, cloudCalls: () => cloudCalls }
+  }
+
+  /** 真实实例只保留云异环相关方法，签到相关的方法换成桩，避免真的打塔吉多接口。 */
+  function createApi(fetchMock: ReturnType<typeof vi.fn>) {
+    const api = new TaygedoApi({ fetch: fetchMock as unknown as typeof fetch })
+    vi.spyOn(api, 'getGameRoles').mockResolvedValue({ roles: [] })
+    vi.spyOn(api, 'getGameRecordCards').mockResolvedValue({ cards: [] })
+    vi.spyOn(api, 'appSignin').mockResolvedValue({ exp: 10, goldCoin: 20 })
+    vi.spyOn(api, 'getSigninState').mockResolvedValue({ days: 1 })
+    vi.spyOn(api, 'getSigninRewards').mockResolvedValue([])
+    vi.spyOn(api, 'gameSignin').mockResolvedValue(undefined)
+    return api
+  }
+
+  it('claims cloud yihuan duration when a valid laohu token is present', async () => {
+    const { fetchMock } = createLaohuFetch()
+    const api = createApi(fetchMock)
+    const cloudSpy = vi.spyOn(api, 'cloudGetUserInfo')
+
+    const result = await runAttendance({
+      accountsSecret: JSON.stringify([
+        { ...laohuAccount, laohuToken: 'valid-laohu-token', laohuUserId: 'laohu-user' },
+      ]),
+      api,
+      maxRetries: 1,
+      coinTasks: false,
+    })
+
+    expect(cloudSpy).toHaveBeenCalledTimes(1)
+    expect(cloudSpy).toHaveBeenCalledWith('valid-laohu-token', 'laohu-user', 'device-1')
+    expect(result.accounts[0]?.cloudDuration).toEqual({ status: 'success', gave: 15, remained: 120 })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('relogs in and retries once when the real api reports an expired laohu session', async () => {
+    const { fetchMock, cloudCalls } = createLaohuFetch({ expireFirst: true })
+    const api = createApi(fetchMock)
+    const cloudSpy = vi.spyOn(api, 'cloudGetUserInfo')
+    const loginSpy = vi.spyOn(api, 'loginWithPassword')
+    const secretWriter = vi.fn()
+
+    const result = await runAttendance({
+      accountsSecret: JSON.stringify([
+        {
+          ...laohuAccount,
+          laohuToken: 'stale-laohu-token',
+          laohuUserId: 'laohu-user',
+          phone: '13800138000',
+        },
+      ]),
+      api,
+      accountPasswords: { main: 'secret-password' },
+      maxRetries: 1,
+      coinTasks: false,
+      secretWriter,
+    })
+
+    expect(cloudCalls()).toBe(2)
+    expect(cloudSpy).toHaveBeenNthCalledWith(1, 'stale-laohu-token', 'laohu-user', 'device-1')
+    expect(cloudSpy).toHaveBeenNthCalledWith(2, 'fresh-laohu-token', 'laohu-user', 'device-1')
+    expect(loginSpy).toHaveBeenCalledWith('13800138000', 'secret-password', 'device-1', {
+      openudid: undefined,
+      vendorid: undefined,
+    })
+    expect(result.accounts[0]?.cloudDuration).toEqual({ status: 'success', gave: 15, remained: 120 })
+    expect(writtenAccounts(secretWriter)).toEqual(result.updatedAccounts)
+  })
+
+  it('logs in first when laohu credentials are missing', async () => {
+    const { fetchMock, cloudCalls } = createLaohuFetch()
+    const api = createApi(fetchMock)
+    const cloudSpy = vi.spyOn(api, 'cloudGetUserInfo')
+
+    const result = await runAttendance({
+      accountsSecret: JSON.stringify([
+        { ...laohuAccount, phone: '13800138000' },
+      ]),
+      api,
+      accountPasswords: { main: 'secret-password' },
+      maxRetries: 1,
+      coinTasks: false,
+    })
+
+    expect(cloudCalls()).toBe(1)
+    expect(cloudSpy).toHaveBeenCalledWith('fresh-laohu-token', 'laohu-user', 'device-1')
+    expect(result.accounts[0]?.cloudDuration).toEqual({ status: 'success', gave: 15, remained: 120 })
+  })
+})
+
+describe('runAttendance secret and attendance bookkeeping', () => {
+  const shanghaiNoon = new Date('2026-05-26T04:00:00.000Z')
+
+  function createSigninApi(overrides: Record<string, unknown> = {}) {
+    return {
+      refreshToken: vi.fn().mockResolvedValue({ accessToken: 'access-main', refreshToken: 'new-main' }),
+      getGameRoles: vi.fn().mockResolvedValue({ roles: [] }),
+      appSignin: vi.fn().mockResolvedValue({ exp: 10, goldCoin: 20 }),
+      getSigninState: vi.fn().mockResolvedValue({ days: 1 }),
+      getSigninRewards: vi.fn().mockResolvedValue([]),
+      gameSignin: vi.fn().mockResolvedValue(undefined),
+      ...overrides,
+    }
+  }
+
+  it('merges refreshed tokens into the latest account file instead of overwriting it', async () => {
+    const secretWriter = vi.fn()
+    const main = {
+      id: 'main',
+      name: '主账号',
+      uid: '1',
+      deviceId: 'device-1',
+      refreshToken: 'old-main',
+      note: '自定义备注',
+    }
+    const alt = {
+      id: 'alt',
+      name: '备用账号',
+      uid: '2',
+      deviceId: 'device-2',
+      refreshToken: 'old-alt',
+      laohuToken: 'other-run-token',
+      laohuUserId: 'other-run-user',
+    }
+
+    await runAttendance({
+      accountsSecret: JSON.stringify([main]),
+      // 另一个实例在本次运行开始后刷新了 alt 的老虎 token，并写回了文件
+      accountsReader: async () => JSON.stringify([main, alt]),
+      api: createSigninApi(),
+      maxRetries: 1,
+      coinTasks: false,
+      secretWriter,
+    })
+
+    const written = writtenAccounts(secretWriter) as Array<Record<string, unknown>>
+    expect(written).toHaveLength(2)
+    expect(written[0]).toEqual(expect.objectContaining({ id: 'main', accessToken: 'access-main', note: '自定义备注' }))
+    // 并发实例刚写好的 token 不能被启动快照覆盖；不认识的自定义字段也要留着
+    expect(written[1]).toEqual(expect.objectContaining({ id: 'alt', laohuToken: 'other-run-token' }))
+  })
+
+  it('does not mark attendance as done when writing the account file fails', async () => {
+    const stateStore = new MemoryStateStore('test')
+    const options = {
+      accountsSecret: JSON.stringify([
+        { id: 'main', name: '主账号', uid: '1', deviceId: 'device-1', refreshToken: 'old-main' },
+      ]),
+      api: createSigninApi(),
+      stateStore,
+      maxRetries: 1,
+      coinTasks: false,
+      now: shanghaiNoon,
+      secretWriter: vi.fn().mockRejectedValue(new Error('EACCES: permission denied')),
+    }
+
+    await expect(runAttendance(options)).rejects.toThrow('EACCES')
+
+    // 账号里的 token 还是旧的，如果这时候记上「今天已签到」，下次运行会跳过这个账号，
+    // 新 token 就再也写不回去了。
+    await expect(stateStore.get('attendance:main:2026-05-26')).resolves.toBeUndefined()
+
+    const retry = await runAttendance({ ...options, secretWriter: vi.fn() })
+    expect(retry.accounts[0]?.status).toBe('success')
+  })
+
+  it('marks attendance as done only after the account file is written', async () => {
+    const inner = new MemoryStateStore('test')
+    const calls: string[] = []
+    const secretWriter = vi.fn(async () => { calls.push('secret') })
+    const stateStore: StateStore = {
+      get: key => inner.get(key),
+      set: async (key, value, options) => {
+        if (key.startsWith('attendance:')) {
+          calls.push('marker')
+        }
+        await inner.set(key, value)
+      },
+    }
+
+    await runAttendance({
+      accountsSecret: JSON.stringify([
+        { id: 'main', name: '主账号', uid: '1', deviceId: 'device-1', refreshToken: 'old-main' },
+      ]),
+      api: createSigninApi(),
+      stateStore,
+      maxRetries: 1,
+      coinTasks: false,
+      now: shanghaiNoon,
+      secretWriter,
+    })
+
+    expect(calls).toEqual(['secret', 'marker'])
+    await expect(stateStore.get('attendance:main:2026-05-26')).resolves.toEqual(expect.objectContaining({ status: 'success' }))
+  })
+})
+
+describe('runAttendance account write-back edge cases', () => {
+  const shanghaiNoon = new Date('2026-05-26T04:00:00.000Z')
+
+  function createApi() {
+    return {
+      refreshToken: vi.fn().mockResolvedValue({ accessToken: 'access-main', refreshToken: 'new-main' }),
+      getGameRoles: vi.fn().mockResolvedValue({ roles: [] }),
+      getGameRecordCards: vi.fn().mockResolvedValue({ cards: [] }),
+      appSignin: vi.fn().mockResolvedValue({ exp: 10, goldCoin: 20 }),
+      getSigninState: vi.fn().mockResolvedValue({ days: 1 }),
+      getSigninRewards: vi.fn().mockResolvedValue([]),
+      gameSignin: vi.fn().mockResolvedValue(undefined),
+    }
+  }
+
+  function account(overrides: Record<string, unknown> = {}) {
+    return { id: 'main', name: '主账号', uid: '1', deviceId: 'device-1', refreshToken: 'old-main', ...overrides }
+  }
+
+  it('drops legacy plaintext password fields from every record and keeps custom fields', async () => {
+    const secretWriter = vi.fn()
+    const withLegacySecret = {
+      ...account(),
+      password: 'plain-text-password',
+      passwordUpdatedAt: '2026-01-01T00:00:00.000Z',
+      note: '自定义备注',
+    }
+    // 本次没有刷新的账号也要清掉旧明文密码
+    const untouched = {
+      id: 'alt',
+      name: '备用账号',
+      uid: '2',
+      deviceId: 'device-2',
+      accessToken: 'stored-alt',
+      refreshToken: 'old-alt',
+      password: 'another-plaintext',
+      passwordUpdatedAt: '2026-01-02T00:00:00.000Z',
+      note: '备用备注',
+    }
+
+    await runAttendance({
+      accountsSecret: JSON.stringify([withLegacySecret, untouched]),
+      api: createApi(),
+      maxRetries: 1,
+      coinTasks: false,
+      secretWriter,
+    })
+
+    const written = writtenAccounts(secretWriter) as Array<Record<string, unknown>>
+    expect(written[0]).toEqual(expect.objectContaining({ id: 'main', note: '自定义备注', accessToken: 'access-main' }))
+    expect(written[1]).toEqual(expect.objectContaining({ id: 'alt', note: '备用备注', refreshToken: 'old-alt' }))
+    for (const record of written) {
+      expect(record).not.toHaveProperty('password')
+      expect(record).not.toHaveProperty('passwordUpdatedAt')
+    }
+  })
+
+  it('refuses to write back when the latest account file cannot be parsed', async () => {
+    const secretWriter = vi.fn()
+
+    await expect(runAttendance({
+      accountsSecret: JSON.stringify([account()]),
+      // 运行期间文件被手工改坏（或只写了一半）
+      accountsReader: async () => '[{"id":',
+      api: createApi(),
+      maxRetries: 1,
+      coinTasks: false,
+      secretWriter,
+    })).rejects.toThrow('最新账号配置不是合法 JSON')
+
+    expect(secretWriter).not.toHaveBeenCalled()
+  })
+
+  it('refuses to write back when the latest account file cannot be read', async () => {
+    const secretWriter = vi.fn()
+
+    await expect(runAttendance({
+      accountsSecret: JSON.stringify([account()]),
+      accountsReader: async () => { throw new Error('EACCES: permission denied') },
+      api: createApi(),
+      maxRetries: 1,
+      coinTasks: false,
+      secretWriter,
+    })).rejects.toThrow('EACCES')
+
+    // 退回启动快照会把这期间新增的账号写没，所以宁可不写
+    expect(secretWriter).not.toHaveBeenCalled()
+  })
+
+  it('discards the update when the config id was reused by another user', async () => {
+    const secretWriter = vi.fn()
+
+    await runAttendance({
+      accountsSecret: JSON.stringify([account()]),
+      // 同一个 config id `main` 在运行期间被换成另一个用户
+      accountsReader: async () => JSON.stringify([account({ uid: '999', deviceId: 'other-device', refreshToken: 'other-refresh' })]),
+      api: createApi(),
+      maxRetries: 1,
+      coinTasks: false,
+      secretWriter,
+    })
+
+    const [written] = writtenAccounts(secretWriter) as Array<Record<string, unknown>>
+    expect(written).toEqual(expect.objectContaining({ uid: '999', deviceId: 'other-device', refreshToken: 'other-refresh' }))
+    expect(written).not.toHaveProperty('accessToken')
+    expect(written).not.toHaveProperty('tokenUpdatedAt')
+  })
+
+  it('marks accounts that need no credential write-back even when another account fails', async () => {
+    const stateStore = new MemoryStateStore('test')
+    const secretWriter = vi.fn().mockRejectedValue(new Error('EACCES: permission denied'))
+    const api = createApi()
+
+    await expect(runAttendance({
+      accountsSecret: JSON.stringify([
+        // 已有 accessToken：本次不需要写回凭据
+        account({ id: 'plain', name: '普通账号', uid: '1', deviceId: 'device-1', accessToken: 'stored-access' }),
+        // 没有 accessToken：会刷新并需要写回
+        account({ id: 'refresh', name: '刷新账号', uid: '2', deviceId: 'device-2', refreshToken: 'old-2' }),
+      ]),
+      api,
+      stateStore,
+      maxRetries: 1,
+      coinTasks: false,
+      now: shanghaiNoon,
+      secretWriter,
+    })).rejects.toThrow('EACCES')
+
+    // plain 没有依赖写回，标记应该已经落下；refresh 的标记要等写回成功，此时不该存在
+    await expect(stateStore.get('attendance:plain:2026-05-26')).resolves.toEqual(expect.objectContaining({ status: 'success' }))
+    await expect(stateStore.get('attendance:refresh:2026-05-26')).resolves.toBeUndefined()
+  })
+
+  it('keeps running with a read-only account store', async () => {
+    const stateStore = new MemoryStateStore('test')
+    const api = createApi()
+
+    // 环境变量账号存储：没有 writer / updater，刷新出的 token 只能本次有效
+    const result = await runAttendance({
+      accountsSecret: JSON.stringify([account()]),
+      api,
+      stateStore,
+      maxRetries: 1,
+      coinTasks: false,
+      now: shanghaiNoon,
+    })
+
+    expect(result.successCount).toBe(1)
+    expect(result.summary).toContain('成功：1')
+    await expect(stateStore.get('attendance:main:2026-05-26')).resolves.toEqual(expect.objectContaining({ status: 'success' }))
+  })
+})
+
+describe('AttendanceService with a read-only account store', () => {
+  it('still records attendance when the account store cannot be written', async () => {
+    const stateStore = new MemoryStateStore('test')
+    const api = {
+      refreshToken: vi.fn().mockResolvedValue({ accessToken: 'access-main', refreshToken: 'new-main' }),
+      getGameRoles: vi.fn().mockResolvedValue({ roles: [] }),
+      getGameRecordCards: vi.fn().mockResolvedValue({ cards: [] }),
+      appSignin: vi.fn().mockResolvedValue({ exp: 10, goldCoin: 20 }),
+      getSigninState: vi.fn().mockResolvedValue({ days: 1 }),
+      getSigninRewards: vi.fn().mockResolvedValue([]),
+      gameSignin: vi.fn().mockResolvedValue(undefined),
+    }
+    const service = new AttendanceService({
+      // TAYGEDO_ACCOUNTS 环境变量：只读，写回必然失败
+      accountStore: new EnvAccountStore(JSON.stringify([
+        { id: 'main', name: '主账号', uid: '1', deviceId: 'device-1', refreshToken: 'old-main' },
+      ])),
+      stateStore,
+      api,
+      maxRetries: 1,
+      coinTasks: false,
+    })
+
+    const result = await service.run()
+
+    // 不能因为「存不下新 token」就把整次签到判成失败
+    expect(result.successCount).toBe(1)
+    expect(result.summary).toContain('成功：1')
+  })
+})

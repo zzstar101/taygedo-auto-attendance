@@ -1,11 +1,12 @@
 import { parseAccountsSecret, type TaygedoAccount } from './config/accounts.js'
-import { TaygedoApi } from './taygedo/api.js'
+import { isLaohuSessionExpiredError, TaygedoApi, type CloudDurationResponse } from './taygedo/api.js'
 import { sendNotification } from './notify.js'
 import { withRetries } from './utils/retry.js'
 import { TAYGEDO_GAME_IDS } from './taygedo/games.js'
 import { decryptPassword } from './config/credentials.js'
 import type { StateStore } from './stores/state-store.js'
 import { shanghaiDateTime } from './utils/time.js'
+import { stripBom } from './utils/text.js'
 
 export interface RunnerDependencies {
   accountsSecret: string
@@ -17,6 +18,13 @@ export interface RunnerDependencies {
   maxRetries?: number
   accountConcurrency?: number
   secretWriter?: (payload: string) => Promise<void>
+  /**
+   * 原子写回：把「读最新内容 → 合并 → 写」交给存储后端完成。
+   * 支持的后端会加跨进程锁，避免两个实例并发刷新时互相覆盖 token。
+   */
+  secretUpdater?: (build: (latestSecret: string) => string) => Promise<void>
+  /** 重新读一次账号配置；仅在没有 `secretUpdater` 时使用。 */
+  accountsReader?: () => Promise<string>
   stateStore?: StateStore
   forceRun?: boolean
   coinTasks?: boolean
@@ -120,7 +128,7 @@ export async function runAttendance(deps: RunnerDependencies): Promise<RunAttend
   const forceRun = deps.forceRun ?? false
   const accounts = parseAccountsSecret(deps.accountsSecret)
   const api = deps.api ?? new TaygedoApi()
-  const accountResults = await mapWithConcurrency(accounts, deps.accountConcurrency ?? 1, async (account) => {
+  const accountResults = await mapWithConcurrency(accounts, deps.accountConcurrency ?? 1, async (account): Promise<AccountResult> => {
     const stateKey = attendanceStateKey(account.id, runDate)
     try {
       if (!forceRun && await deps.stateStore?.get(stateKey)) {
@@ -147,14 +155,24 @@ export async function runAttendance(deps: RunnerDependencies): Promise<RunAttend
         })
       }, deps.maxRetries ?? 3)
 
-      await deps.stateStore?.set(stateKey, {
-        status: 'success',
-        accountId: account.id,
-        accountName: account.name,
-        date: runDate,
-        updatedAt: new Date().toISOString(),
-      }, { ttlSeconds: 60 * 60 * 36 })
-      return accountRun
+      // 「今天已签到」标记要等账号配置写回成功后再落盘，否则写回失败时下次运行会
+      // 直接跳过该账号，新 token 永远存不下来。
+      // 但「不需要写回凭据」的账号没有这个依赖，当场就记，别被别的账号的写回失败牵连。
+      const marker: AttendanceMarker = {
+        key: stateKey,
+        value: {
+          status: 'success',
+          accountId: account.id,
+          accountName: account.name,
+          date: runDate,
+          updatedAt: new Date().toISOString(),
+        },
+      }
+      if (accountRun.shouldUpdateSecret) {
+        return { ...accountRun, attendanceMarker: marker }
+      }
+      await recordAttendanceMarker(deps.stateStore, marker)
+      return { ...accountRun, attendanceMarker: undefined }
     }
     catch (error) {
       return {
@@ -176,9 +194,11 @@ export async function runAttendance(deps: RunnerDependencies): Promise<RunAttend
   const secretUpdateCount = accountResults.filter(result => result.shouldUpdateSecret).length
   const accountSummaries = accountResults.map(result => result.summary)
 
-  if (secretUpdateCount > 0 && deps.secretWriter) {
-    await deps.secretWriter(JSON.stringify(updatedAccounts, null, 2))
+  if (secretUpdateCount > 0) {
+    await persistUpdatedAccounts(deps, accounts, updatedAccounts)
   }
+
+  await recordAttendanceMarkers(deps.stateStore, accountResults)
 
   const summary = buildSummary(accountSummaries)
   console.log(summary)
@@ -224,10 +244,240 @@ export async function runAttendance(deps: RunnerDependencies): Promise<RunAttend
   return result
 }
 
+interface AttendanceMarker {
+  key: string
+  value: Record<string, unknown>
+}
+
+/** 把「今天已签到」标记落到状态存储。失败只影响当天的去重，不该影响这次的结果。 */
+async function recordAttendanceMarker(stateStore: StateStore | undefined, marker: AttendanceMarker): Promise<void> {
+  try {
+    await stateStore?.set(marker.key, marker.value, { ttlSeconds: 60 * 60 * 36 })
+  }
+  catch (error) {
+    console.warn(`写入签到状态失败（今天可能重复签到）：${errorMessage(error)}`)
+  }
+}
+
+async function recordAttendanceMarkers(
+  stateStore: StateStore | undefined,
+  results: AccountResult[],
+): Promise<void> {
+  for (const result of results) {
+    if (result.attendanceMarker) {
+      await recordAttendanceMarker(stateStore, result.attendanceMarker)
+    }
+  }
+}
+
+/**
+ * 把本次刷新的凭据写回账号配置。
+ *
+ * 优先后端自己的 `updateAccounts`（文件后端会用跨进程锁把「读 → 合并 → 写」整体
+ * 包住）；没有的话退化成「读一次 + 合并 + 写一次」，并发时仍有覆盖窗口。
+ *
+ * 读最新内容失败时直接抛出、不动原文件：退化成启动快照会把运行期间新增的账号写没。
+ */
+async function persistUpdatedAccounts(
+  deps: RunnerDependencies,
+  accounts: TaygedoAccount[],
+  updatedAccounts: TaygedoAccount[],
+): Promise<void> {
+  const build = (latestSecret: string) => buildUpdatedAccountsSecret({
+    originalSecret: deps.accountsSecret,
+    latestSecret,
+    accounts,
+    updatedAccounts,
+  })
+
+  if (deps.secretUpdater) {
+    await deps.secretUpdater(build)
+    return
+  }
+  if (!deps.secretWriter) {
+    console.warn('账号存储是只读的，本次刷新出的 token 只在本次运行内有效；如需持久化请改用可写存储')
+    return
+  }
+  const latestSecret = deps.accountsReader ? await deps.accountsReader() : deps.accountsSecret
+  await deps.secretWriter(build(latestSecret))
+}
+
+/** 写回账号配置时可以变动的字段（其余字段不是用户数据就是本次运行不会碰的）。 */
+const MUTABLE_ACCOUNT_FIELDS = [
+  'name',
+  'uid',
+  'deviceId',
+  'openudid',
+  'vendorid',
+  'refreshToken',
+  'accessToken',
+  'laohuToken',
+  'laohuUserId',
+  'tokenUpdatedAt',
+  'phone',
+  'encryptedPassword',
+  'roleId',
+  'roleName',
+] as const satisfies ReadonlyArray<keyof TaygedoAccount>
+
+/**
+ * 旧版本写过、现在只应该被清掉的明文密码字段。
+ *
+ * README 承诺「旧配置里的 password / passwordUpdatedAt 读取后丢弃、下次写回自然清理」，
+ * 所以写回时对所有记录都要摘掉它们（包括本次没刷新的账号），不能原样带回去。
+ */
+const LEGACY_SECRET_FIELDS = ['password', 'passwordUpdatedAt'] as const
+
+/**
+ * 生成要写回的账号配置 JSON。
+ *
+ * 以「最新内容」为底稿、只覆盖本次运行真正改过的字段，因此：
+ * - 并发实例各自刷新不同账号时，后写的一方不会用旧快照覆盖对方的新 token；
+ * - 账号 JSON 里本程序不认识的字段（自定义备注等）原样保留；
+ * - 旧明文密码字段被清掉。
+ */
+export function buildUpdatedAccountsSecret(options: {
+  originalSecret: string
+  latestSecret?: string
+  accounts: TaygedoAccount[]
+  updatedAccounts: TaygedoAccount[]
+}): string {
+  const baseAccounts = resolveBaseAccounts(options)
+
+  const originals = new Map(options.accounts.map(account => [account.id, account]))
+  const patches = new Map<string, Record<string, unknown>>()
+  for (const updated of options.updatedAccounts) {
+    const original = originals.get(updated.id)
+    if (!original) {
+      continue
+    }
+    const patch = diffAccountFields(original, updated)
+    if (Object.keys(patch).length > 0) {
+      patches.set(updated.id, patch)
+    }
+  }
+
+  if (patches.size === 0) {
+    // 没有任何字段需要更新，保持底稿原样（连带保住不认识的字段，但清掉旧明文密码）。
+    return JSON.stringify(
+      baseAccounts.length > 0 ? baseAccounts.map(stripLegacySecretFields) : options.updatedAccounts,
+      null,
+      2,
+    )
+  }
+
+  const applied = new Set<string>()
+  const merged = baseAccounts.map((raw) => {
+    if (!isPlainObject(raw) || typeof raw.id !== 'string') {
+      return stripLegacySecretFields(raw)
+    }
+    const original = originals.get(raw.id)
+    const patch = patches.get(raw.id)
+    if (!original || !patch) {
+      return stripLegacySecretFields(raw)
+    }
+    if (!isSameAccountIdentity(original, raw)) {
+      // id 只是配置名（`main` 可以随时改成另一个用户）：身份对不上就不能把旧 token
+      // 贴到新用户的记录上，否则会写出「新 uid + 旧 token」的坏组合。
+      console.warn(`账号 ${raw.id} 在运行期间被替换为其他用户，丢弃本次写回`)
+      return stripLegacySecretFields(raw)
+    }
+    applied.add(raw.id)
+    return stripLegacySecretFields({ ...raw, ...patch })
+  })
+
+  for (const id of patches.keys()) {
+    if (!applied.has(id)) {
+      // 最新内容里已经没有这个账号（并发运行删掉了它）：不强行写回去。
+      console.warn(`账号 ${id} 已不在账号配置中，跳过写回`)
+    }
+  }
+
+  return JSON.stringify(merged, null, 2)
+}
+
+function resolveBaseAccounts(options: {
+  originalSecret: string
+  latestSecret?: string
+  updatedAccounts: TaygedoAccount[]
+}): unknown[] {
+  if (options.latestSecret === undefined) {
+    return parseRawAccounts(options.originalSecret) ?? options.updatedAccounts
+  }
+  const latest = parseRawAccounts(options.latestSecret)
+  if (latest === undefined) {
+    // 调用方已经能读到最新内容，说明就该以它为准；解析不了还硬写回去等于拿旧快照覆盖。
+    throw new Error('最新账号配置不是合法 JSON，已跳过写回以免覆盖运行期间新增的账号')
+  }
+  return latest
+}
+
+/** 账号身份是否还是启动时那个用户（uid / deviceId 是用户身份，id 只是配置名）。 */
+function isSameAccountIdentity(original: TaygedoAccount, raw: Record<string, unknown>): boolean {
+  if (typeof raw.uid === 'string' && raw.uid !== original.uid) {
+    return false
+  }
+  if (typeof raw.deviceId === 'string' && raw.deviceId !== original.deviceId) {
+    return false
+  }
+  return true
+}
+
+function stripLegacySecretFields(raw: unknown): unknown {
+  if (!isPlainObject(raw)) {
+    return raw
+  }
+  let stripped: Record<string, unknown> | undefined
+  for (const field of LEGACY_SECRET_FIELDS) {
+    if (field in raw) {
+      stripped ??= { ...raw }
+      delete stripped[field]
+    }
+  }
+  return stripped ?? raw
+}
+
+function diffAccountFields(original: TaygedoAccount, updated: TaygedoAccount): Record<string, unknown> {
+  const patch: Record<string, unknown> = {}
+  for (const field of MUTABLE_ACCOUNT_FIELDS) {
+    const next = updated[field]
+    if (next === undefined) {
+      // 不给「删除字段」留口子：只增改，永不抹掉原有值。
+      continue
+    }
+    if (JSON.stringify(original[field]) !== JSON.stringify(next)) {
+      patch[field] = next
+    }
+  }
+  return patch
+}
+
+function parseRawAccounts(secret: string | undefined): unknown[] | undefined {
+  if (secret === undefined) {
+    return undefined
+  }
+  try {
+    const parsed = JSON.parse(stripBom(secret).trim()) as unknown
+    return Array.isArray(parsed) ? parsed : undefined
+  }
+  catch {
+    return undefined
+  }
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
 interface AccountRunResult {
   updatedAccount: TaygedoAccount
   shouldUpdateSecret: boolean
   summary: AccountRunSummary
+}
+
+interface AccountResult extends AccountRunResult {
+  /** 本次运行成功时待落盘的「今天已签到」标记。 */
+  attendanceMarker?: AttendanceMarker
 }
 
 async function runAccount(
@@ -563,72 +813,110 @@ async function runCloudDuration(
   if (!api.cloudGetUserInfo) {
     return undefined
   }
-  let laohuToken = account.laohuToken
-  let laohuUserId = account.laohuUserId
+  // 必须绑回 api：这两个方法内部读 `this.fetchImpl`，把方法摘下来单独存成变量
+  // 再调用会让 `this` 变成 undefined，真实 TaygedoApi 实例上直接 TypeError。
+  const cloudGetUserInfo = api.cloudGetUserInfo.bind(api)
+  const loginWithPassword = api.loginWithPassword?.bind(api)
   let updatedAccount: TaygedoAccount | undefined
 
-  if (!laohuToken || !laohuUserId) {
+  const respond = (summary: CloudDurationSummary) => ({
+    summary,
+    ...(updatedAccount ? { updatedAccount, shouldUpdateSecret: true } : {}),
+  })
+
+  // 云异环只认老虎 token，refreshToken 无法续期：token 过期（code=10004）时
+  // 只能用手机号 + 密码重新登录一次换个新 token。
+  const reloginLaohu = async (): Promise<LaohuCredentials | undefined> => {
+    const phone = account.phone
     const password = resolveAccountPassword(account, accountPasswords, credentialKey)
-    if (!account.phone || !password || !api.loginWithPassword) {
-      return {
-        summary: {
-          status: 'skipped',
-          skippedReason: '账号缺少 laohuToken/laohuUserId',
-        },
-      }
+    if (!phone || !password || !loginWithPassword) {
+      return undefined
     }
-    try {
-      const login = await api.loginWithPassword(account.phone, password, account.deviceId, {
-        openudid: account.openudid,
-        vendorid: account.vendorid,
-      })
-      laohuToken = login.token
-      laohuUserId = login.userId
-      updatedAccount = {
-        ...account,
-        laohuToken,
-        laohuUserId,
-        tokenUpdatedAt: shanghaiDateTime(),
-      }
+    const login = await loginWithPassword(phone, password, account.deviceId, {
+      openudid: account.openudid,
+      vendorid: account.vendorid,
+    })
+    updatedAccount = {
+      ...account,
+      laohuToken: login.token,
+      laohuUserId: login.userId,
+      tokenUpdatedAt: shanghaiDateTime(),
     }
-    catch (error) {
-      return {
-        summary: {
-          status: 'failed',
-          error: `老虎登录失败：${errorMessage(error)}`,
-        },
-      }
-    }
+    return { token: login.token, userId: login.userId }
   }
 
-  if (!laohuToken || !laohuUserId) {
-    return {
-      summary: {
-      status: 'skipped',
-      skippedReason: '账号缺少 laohuToken/laohuUserId',
-      },
+  let credentials: LaohuCredentials | undefined = account.laohuToken && account.laohuUserId
+    ? { token: account.laohuToken, userId: account.laohuUserId }
+    : undefined
+
+  if (!credentials) {
+    try {
+      credentials = await reloginLaohu()
+    }
+    catch (error) {
+      return respond({
+        status: 'failed',
+        error: `老虎登录失败：${errorMessage(error)}`,
+      })
+    }
+    if (!credentials) {
+      return respond({
+        status: 'skipped',
+        skippedReason: '账号缺少 laohuToken/laohuUserId',
+      })
     }
   }
 
   try {
-    const result = await api.cloudGetUserInfo(laohuToken, laohuUserId, account.deviceId)
-    return {
-      summary: {
-        status: 'success',
-        gave: result.gave,
-        ...(result.remained === undefined ? {} : { remained: result.remained }),
-      },
-      ...(updatedAccount ? { updatedAccount, shouldUpdateSecret: true } : {}),
-    }
+    return respond(toCloudDurationSummary(await cloudGetUserInfo(credentials.token, credentials.userId, account.deviceId)))
   }
   catch (error) {
-    return {
-      summary: {
+    if (!isLaohuSessionExpiredError(error)) {
+      return respond({
         status: 'failed',
         error: errorMessage(error),
-      },
-      ...(updatedAccount ? { updatedAccount, shouldUpdateSecret: true } : {}),
+      })
     }
+
+    let refreshed: LaohuCredentials | undefined
+    try {
+      refreshed = await reloginLaohu()
+    }
+    catch (loginError) {
+      return respond({
+        status: 'failed',
+        error: `老虎登录失败：${errorMessage(loginError)}`,
+      })
+    }
+    if (!refreshed) {
+      return respond({
+        status: 'failed',
+        error: `${errorMessage(error)}；laohuToken 已过期，请重新执行登录流程（或手动更新 laohuToken/laohuUserId），也可以补充手机号和密码以便之后自动重新登录`,
+      })
+    }
+
+    try {
+      return respond(toCloudDurationSummary(await cloudGetUserInfo(refreshed.token, refreshed.userId, account.deviceId)))
+    }
+    catch (retryError) {
+      return respond({
+        status: 'failed',
+        error: errorMessage(retryError),
+      })
+    }
+  }
+}
+
+interface LaohuCredentials {
+  token: string
+  userId: string
+}
+
+function toCloudDurationSummary(result: CloudDurationResponse): CloudDurationSummary {
+  return {
+    status: 'success',
+    gave: result.gave,
+    ...(result.remained === undefined ? {} : { remained: result.remained }),
   }
 }
 

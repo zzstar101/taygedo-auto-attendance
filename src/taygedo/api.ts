@@ -86,6 +86,22 @@ export interface CloudDurationResponse {
   remained?: number
 }
 
+/** 老虎 token 过期时，接口仍返回 HTTP 200，只在业务码/文案里要求重新登录。 */
+const LAOHU_RELOGIN_REQUIRED_CODE_PATTERN = /code=10004(?!\d)/
+const LAOHU_RELOGIN_REQUIRED_TEXT_PATTERN = /登陆失效|登录失效|需要重新登陆|需要重新登录/
+
+/**
+ * 判断错误是否代表老虎 token 已失效、必须重新登录。
+ * `refreshToken` 无法续期老虎 token，调用方只能重新走一次密码登录。
+ */
+export function isLaohuSessionExpiredError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false
+  }
+  return LAOHU_RELOGIN_REQUIRED_CODE_PATTERN.test(error.message)
+    || LAOHU_RELOGIN_REQUIRED_TEXT_PATTERN.test(error.message)
+}
+
 export class TaygedoApi {
   private readonly fetchImpl: typeof fetch
   private readonly userCenterFetchImpl: typeof fetch

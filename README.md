@@ -527,6 +527,15 @@ pnpm local device --accounts-file data/accounts.json --account-id main --force
 
 </details>
 
+#### Windows 本地运行
+
+本地 CLI 在 Windows 上可以直接用 `pnpm local ...`（PowerShell / CMD / Git Bash 均可），不需要 WSL：
+
+- 账号文件用记事本、VS Code 或 PowerShell（`>`、`Out-File` 默认 UTF-16LE）保存都能正常读取，UTF-8 BOM 和 UTF-16 会自动识别；如果仍有解析报错，把文件另存为不带 BOM 的 UTF-8。
+- 文件状态存储把整个 key 按字节转义成单个文件名，放在 `<state-dir>/<prefix>/v2/` 下（例如 `attendance:main:2026-11-25` 落盘为 `v2/k-attendance%3amain%3a2026-11-25.json`），避免冒号在 Windows 上写状态报 `ENOENT`。
+- `pnpm cloud:function:pack` 在没有 `zip` 的 Windows 上会回退到系统自带的 `bsdtar`（`%SystemRoot%\System32\tar.exe`）。
+- `scripts/qinglong.sh` 是给 Linux 青龙面板用的 bash 脚本，Windows 上想用需要 Git Bash 或 WSL。
+
 ## 登录方式
 
 ### 密码登录
@@ -607,7 +616,7 @@ account_name=主账号
 ]
 ```
 
-账号 JSON 不保存明文密码。`encryptedPassword` 是加密后的密码，必须配合 `TAYGEDO_CREDENTIAL_KEY` 或本地密钥文件才能解密。旧配置中如果存在 `password` / `passwordUpdatedAt`，程序读取后会丢弃，后续写回会自然清理。
+账号 JSON 不保存明文密码。`encryptedPassword` 是加密后的密码，必须配合 `TAYGEDO_CREDENTIAL_KEY` 或本地密钥文件才能解密。旧配置中如果存在 `password` / `passwordUpdatedAt`，程序读取后会丢弃，写回账号配置时（包括本次没有刷新的账号）也会一并从文件里清掉。
 
 `deviceId`、`openudid`、`vendorid` 会在登录或 `pnpm local device` 时生成。默认复用已有设备字段；登录 CLI 可加 `--new-device`，Cloudflare 登录页可勾选“生成新设备”。
 
@@ -625,6 +634,19 @@ account_name=主账号
 ### 云异环时长
 
 每日签到默认会尝试调用云异环 `getUserInfo` 接口，触发每日首次登录赠送时长，并在通知摘要里显示本次赠送分钟和剩余分钟。此功能优先复用账号 JSON 中的 `laohuToken` / `laohuUserId`；缺少 token 但有手机号和可用密码时，会先密码登录拿老虎 token 并写回账号配置。
+
+老虎 token 会过期，过期后接口返回 `code=10004`（`登陆失效，需要重新登陆`），而 `refreshToken` 只能续期塔吉多 token、续不了老虎 token。因此摘要里出现该错误时，程序会用手机号和密码自动重新登录换新老虎 token 并重试一次，成功后把新 token 写回账号配置：
+- 账号配置里有手机号和密码（`TAYGEDO_PASSWORDS` / `encryptedPassword`）时，下一次运行会自动恢复，无需手工处理。
+- 没有可用密码时，该账号的云异环任务会失败并提示更新 `laohuToken` / `laohuUserId`，或重新跑一次登录流程补上手机号和密码；APP 签到、游戏签到和金币任务不受影响。
+
+写回账号配置时只覆盖本次运行真正改动的字段，并且：
+
+- 文件存储会把「读最新内容 → 合并 → 写」整体放进跨进程锁，两个实例并发刷新不同账号时不会互相覆盖刚拿到的 token；KV / Upstash 等后端没有条件写入，仍是「读一次再写一次」，请避免对同一份配置并发触发。
+- 账号 JSON 里本程序不认识的字段（例如自定义备注）原样保留；旧配置里的 `password` / `passwordUpdatedAt` 明文密码字段会在写回时清掉。
+- 写回前按 `uid` / `deviceId` 核对身份：如果同一个 `account_id` 在运行期间被换成了另一个用户，本次更新直接丢弃，不会写出「新用户 uid + 旧 token」的组合。
+- 最新账号配置读不到或解析失败时不做写回（保留原文件并报错），避免拿启动快照把这期间新增的账号写没。
+- 「今天已签到」的标记：不需要写回凭据的账号当场记录；需要写回的账号要等写回成功后才记录，所以写回失败不会让下一次运行直接跳过它。
+- 账号存储只读（`TAYGEDO_ACCOUNTS` 环境变量）时不会因为「存不下新 token」判失败，签到结果照常产出，只是新 token 仅本次运行有效。
 
 | 配置 | 说明 |
 | --- | --- |
@@ -680,6 +702,14 @@ TAYGEDO_SERVERCHAN_SENDKEY=SCTxxxxxxxxxxxxxxxxxxxxxxxx
 Cloudflare Workers 默认使用 KV；Docker 和本地 CLI 默认使用文件存储。
 
 `TAYGEDO_ACCOUNT_STORE=unstorage` 或 `TAYGEDO_STATE_STORE=unstorage` 时，程序按优先级自动选择：Redis、S3、Upstash、本地 `.data/kv`。
+
+文件状态存储会把状态 key 转义成一个安全的文件名，放在状态目录的 `v2/` 子目录下：
+
+- 转义结果只含小写字母、数字、`_`、`-` 和 `%xx`（`attendance:main:2026-11-25` → `k-attendance%3amain%3a2026-11-25.json`）。大写字母也会被转义，因此在 Windows / macOS 这类大小写不敏感的文件系统上，`Main` 和 `main` 不会共用同一个状态文件。
+- 名字过长（转义后超过 150 字符）时退化成定长哈希名 `k-~<sha256>.json`，避免 `ENAMETOOLONG`。
+- 旧版本写在未转义文件名下的状态仍会被读取（`foo%bar` 这种老文件名也一样），并会在下次写入时同步到新文件名。旧文件不会被删除——混合版本运行期间，还没升级的进程只认旧文件名，删掉会让它当天重复签到。确认所有运行实例都升级后，可以手动清理 `data/state/<prefix>/` 下的旧 `.json`。
+- 写入先落到同目录临时文件再 `rename`，读到半个文件时回退读旧文件，不会因为一次中断就卡住当天签到；已有状态文件的权限位会保留（原本是 `0600` 就还是 `0600`）。
+- 回退读旧文件时会核对记录里的 `accountId` / `date`，大小写不敏感的卷上不会把 `Main` 的标记当成 `main` 的。
 
 ### 失败排查
 
