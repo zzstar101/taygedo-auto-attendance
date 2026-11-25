@@ -1,6 +1,5 @@
-import { chmod, mkdir, writeFile } from 'node:fs/promises'
-import { dirname } from 'node:path'
 import { readTextFile } from '../utils/text.js'
+import { writeSecretFile } from '../utils/atomic-write.js'
 
 export interface AccountStore {
   readAccounts(): Promise<string>
@@ -36,11 +35,10 @@ export class FileAccountStore implements AccountStore {
   }
 
   async writeAccounts(payload: string): Promise<void> {
-    await mkdir(dirname(this.path), { recursive: true })
-    await writeFile(this.path, `${payload}\n`, { encoding: 'utf8', mode: 0o600 })
-    // writeFile 的 mode 只在新建文件时生效，覆盖已有文件不会收紧权限，
-    // 所以补一次 chmod。Windows 上 chmod 只切换只读标记，失败也不影响写入。
-    await chmod(this.path, 0o600).catch(() => undefined)
+    // 先写 0600 的临时文件再原子替换：`writeFile` 的 mode 只在新建文件时生效，
+    // 覆盖已有文件不会收紧权限，而「写完再 chmod」的窗口期里新凭据已经可被其他
+    // 用户读到（已有文件属于别人且是 0666 时，chmod 还会直接 EPERM）。
+    await writeSecretFile(this.path, `${payload}\n`)
   }
 }
 

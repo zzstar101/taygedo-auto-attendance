@@ -1,7 +1,6 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes, scryptSync } from 'node:crypto'
-import { chmod, mkdir, writeFile } from 'node:fs/promises'
-import { dirname } from 'node:path'
 import { readTextFile } from '../utils/text.js'
+import { writeSecretFile } from '../utils/atomic-write.js'
 
 export type EncryptedPassword = LegacyEncryptedPassword | ScryptEncryptedPassword
 
@@ -40,9 +39,7 @@ export async function loadOrCreateCredentialKey(path: string): Promise<string> {
     }
   }
   const key = generateCredentialKey()
-  await mkdir(dirname(path), { recursive: true })
-  await writeFile(path, `${key}\n`, { encoding: 'utf8', mode: 0o600 })
-  await chmod(path, 0o600).catch(() => undefined)
+  await writeSecretFile(path, `${key}\n`)
   return key
 }
 

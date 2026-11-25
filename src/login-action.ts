@@ -1,10 +1,9 @@
-import { chmod, mkdir, writeFile } from 'node:fs/promises'
-import { dirname } from 'node:path'
 import { TaygedoApi, type BindRoleResponse, type LoginWithCaptchaResponse, type UserCenterLoginResponse } from './taygedo/api.js'
 import { parseAccountsSecret, type TaygedoAccount } from './config/accounts.js'
 import { encryptPassword, generateCredentialKey } from './config/credentials.js'
 import { generateDeviceIdentity, type DeviceIdentity } from './taygedo/device.js'
 import { shanghaiDateTime } from './utils/time.js'
+import { writeSecretFile } from './utils/atomic-write.js'
 import { isEntryModule } from './utils/entry.js'
 
 export interface LoginActionDependencies {
@@ -36,7 +35,7 @@ export async function runLoginAction(deps: LoginActionDependencies = {}): Promis
     })
     const devicePath = optionalEnv(env, 'TAYGEDO_LOGIN_DEVICE_ID_PATH')
     if (devicePath) {
-      await writeTextFile(devicePath, `${device.deviceId}\n`)
+      await writeSecretFile(devicePath, `${device.deviceId}\n`)
     }
     console.log('验证码已发送，请在当前登录页面继续输入验证码。')
     return
@@ -103,7 +102,7 @@ export async function runLoginAction(deps: LoginActionDependencies = {}): Promis
     const credentialKeyPath = optionalEnv(env, 'TAYGEDO_CREDENTIAL_KEY_PATH')
     if (!credentialKey && credentialKeyPath) {
       credentialKey = generateCredentialKey()
-      await writeTextFile(credentialKeyPath, `${credentialKey}\n`)
+      await writeSecretFile(credentialKeyPath, `${credentialKey}\n`)
     }
     if (credentialKey && password) {
       nextAccount.encryptedPassword = encryptPassword(password, credentialKey)
@@ -124,7 +123,7 @@ export async function runLoginAction(deps: LoginActionDependencies = {}): Promis
     await deps.writeAccounts(payload)
   }
   else {
-    await writeTextFile(accountsPath, `${payload}\n`)
+    await writeSecretFile(accountsPath, `${payload}\n`)
   }
   deps.onStage?.('account-written', {
     accountCount: updatedAccounts.length,
@@ -149,13 +148,6 @@ function upsertAccount(accounts: TaygedoAccount[], nextAccount: TaygedoAccount):
   const copied = accounts.slice()
   copied[index] = nextAccount
   return copied
-}
-
-async function writeTextFile(path: string, content: string): Promise<void> {
-  await mkdir(dirname(path), { recursive: true })
-  // accounts.json / credential-key 都是敏感文件，避免被同机其他用户读到（Windows 上 chmod 无副作用）。
-  await writeFile(path, content, { encoding: 'utf8', mode: 0o600 })
-  await chmod(path, 0o600).catch(() => undefined)
 }
 
 function requireEnv(env: Record<string, string | undefined>, key: string): string {

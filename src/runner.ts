@@ -6,6 +6,7 @@ import { TAYGEDO_GAME_IDS } from './taygedo/games.js'
 import { decryptPassword } from './config/credentials.js'
 import type { StateStore } from './stores/state-store.js'
 import { shanghaiDateTime } from './utils/time.js'
+import { stripBom } from './utils/text.js'
 
 export interface RunnerDependencies {
   accountsSecret: string
@@ -17,6 +18,8 @@ export interface RunnerDependencies {
   maxRetries?: number
   accountConcurrency?: number
   secretWriter?: (payload: string) => Promise<void>
+  /** 重新读一次账号配置；用于写回前合并并发运行刚更新的 token。 */
+  accountsReader?: () => Promise<string>
   stateStore?: StateStore
   forceRun?: boolean
   coinTasks?: boolean
@@ -120,7 +123,7 @@ export async function runAttendance(deps: RunnerDependencies): Promise<RunAttend
   const forceRun = deps.forceRun ?? false
   const accounts = parseAccountsSecret(deps.accountsSecret)
   const api = deps.api ?? new TaygedoApi()
-  const accountResults = await mapWithConcurrency(accounts, deps.accountConcurrency ?? 1, async (account) => {
+  const accountResults = await mapWithConcurrency(accounts, deps.accountConcurrency ?? 1, async (account): Promise<AccountResult> => {
     const stateKey = attendanceStateKey(account.id, runDate)
     try {
       if (!forceRun && await deps.stateStore?.get(stateKey)) {
@@ -147,14 +150,21 @@ export async function runAttendance(deps: RunnerDependencies): Promise<RunAttend
         })
       }, deps.maxRetries ?? 3)
 
-      await deps.stateStore?.set(stateKey, {
-        status: 'success',
-        accountId: account.id,
-        accountName: account.name,
-        date: runDate,
-        updatedAt: new Date().toISOString(),
-      }, { ttlSeconds: 60 * 60 * 36 })
-      return accountRun
+      // 「今天已签到」标记不在这里落盘：账号配置（可能带着刚刷新的 token）还没写回，
+      // 一旦写回失败就该让下一次运行重跑，否则新 token 永远存不下来。
+      return {
+        ...accountRun,
+        attendanceMarker: {
+          key: stateKey,
+          value: {
+            status: 'success',
+            accountId: account.id,
+            accountName: account.name,
+            date: runDate,
+            updatedAt: new Date().toISOString(),
+          },
+        },
+      }
     }
     catch (error) {
       return {
@@ -177,8 +187,19 @@ export async function runAttendance(deps: RunnerDependencies): Promise<RunAttend
   const accountSummaries = accountResults.map(result => result.summary)
 
   if (secretUpdateCount > 0 && deps.secretWriter) {
-    await deps.secretWriter(JSON.stringify(updatedAccounts, null, 2))
+    // 写回前重新读一次账号文件，把本次更新的字段合并进最新内容：
+    // 两个实例并发跑、各自刷新了不同账号时，直接写回启动快照会抹掉对方刚拿到的 token；
+    // 顺带只覆盖变动的字段，账号 JSON 里不认识的字段（自定义备注等）也不会被丢掉。
+    const latestSecret = await readLatestAccountsSecret(deps)
+    await deps.secretWriter(buildUpdatedAccountsSecret({
+      originalSecret: deps.accountsSecret,
+      latestSecret,
+      accounts,
+      updatedAccounts,
+    }))
   }
+
+  await recordAttendanceMarkers(deps.stateStore, accountResults)
 
   const summary = buildSummary(accountSummaries)
   console.log(summary)
@@ -224,10 +245,159 @@ export async function runAttendance(deps: RunnerDependencies): Promise<RunAttend
   return result
 }
 
+interface AttendanceMarker {
+  key: string
+  value: Record<string, unknown>
+}
+
+/** 把「今天已签到」标记落到状态存储。失败只影响当天的去重，不该影响这次的结果。 */
+async function recordAttendanceMarkers(
+  stateStore: StateStore | undefined,
+  results: AccountResult[],
+): Promise<void> {
+  for (const result of results) {
+    if (!result.attendanceMarker) {
+      continue
+    }
+    try {
+      await stateStore?.set(result.attendanceMarker.key, result.attendanceMarker.value, { ttlSeconds: 60 * 60 * 36 })
+    }
+    catch (error) {
+      console.warn(`写入签到状态失败（今天可能重复签到）：${errorMessage(error)}`)
+    }
+  }
+}
+
+async function readLatestAccountsSecret(deps: RunnerDependencies): Promise<string | undefined> {
+  if (!deps.accountsReader) {
+    return undefined
+  }
+  try {
+    return await deps.accountsReader()
+  }
+  catch (error) {
+    console.warn(`读取最新账号配置失败，改按启动时的内容合并：${errorMessage(error)}`)
+    return undefined
+  }
+}
+
+/** 写回账号配置时可以变动的字段（其余字段不是用户数据就是本次运行不会碰的）。 */
+const MUTABLE_ACCOUNT_FIELDS = [
+  'name',
+  'uid',
+  'deviceId',
+  'openudid',
+  'vendorid',
+  'refreshToken',
+  'accessToken',
+  'laohuToken',
+  'laohuUserId',
+  'tokenUpdatedAt',
+  'phone',
+  'encryptedPassword',
+  'roleId',
+  'roleName',
+] as const satisfies ReadonlyArray<keyof TaygedoAccount>
+
+/**
+ * 生成要写回的账号配置 JSON。
+ *
+ * 以「重新读到的最新内容」为底稿、只覆盖本次运行真正改过的字段，因此：
+ * - 并发实例各自刷新不同账号时，后写的一方不会用旧快照覆盖对方的新 token；
+ * - 账号 JSON 里本程序不认识的字段原样保留。
+ */
+export function buildUpdatedAccountsSecret(options: {
+  originalSecret: string
+  latestSecret?: string
+  accounts: TaygedoAccount[]
+  updatedAccounts: TaygedoAccount[]
+}): string {
+  const baseAccounts = parseRawAccounts(options.latestSecret)
+    ?? parseRawAccounts(options.originalSecret)
+    ?? []
+
+  const originals = new Map(options.accounts.map(account => [account.id, account]))
+  const patches = new Map<string, Record<string, unknown>>()
+  for (const updated of options.updatedAccounts) {
+    const original = originals.get(updated.id)
+    if (!original) {
+      continue
+    }
+    const patch = diffAccountFields(original, updated)
+    if (Object.keys(patch).length > 0) {
+      patches.set(updated.id, patch)
+    }
+  }
+
+  if (patches.size === 0) {
+    // 没有任何字段需要更新，保持底稿原样（连带保住不认识的字段）。
+    return JSON.stringify(baseAccounts.length > 0 ? baseAccounts : options.updatedAccounts, null, 2)
+  }
+
+  const applied = new Set<string>()
+  const merged = baseAccounts.map((raw) => {
+    if (!isPlainObject(raw) || typeof raw.id !== 'string') {
+      return raw
+    }
+    const patch = patches.get(raw.id)
+    if (!patch) {
+      return raw
+    }
+    applied.add(raw.id)
+    return { ...raw, ...patch }
+  })
+
+  for (const id of patches.keys()) {
+    if (!applied.has(id)) {
+      // 最新内容里已经没有这个账号（并发运行删掉了它）：不强行写回去。
+      console.warn(`账号 ${id} 已不在账号配置中，跳过写回`)
+    }
+  }
+
+  return JSON.stringify(merged, null, 2)
+}
+
+function diffAccountFields(original: TaygedoAccount, updated: TaygedoAccount): Record<string, unknown> {
+  const patch: Record<string, unknown> = {}
+  for (const field of MUTABLE_ACCOUNT_FIELDS) {
+    const next = updated[field]
+    if (next === undefined) {
+      // 不给「删除字段」留口子：只增改，永不抹掉原有值。
+      continue
+    }
+    if (JSON.stringify(original[field]) !== JSON.stringify(next)) {
+      patch[field] = next
+    }
+  }
+  return patch
+}
+
+function parseRawAccounts(secret: string | undefined): unknown[] | undefined {
+  if (secret === undefined) {
+    return undefined
+  }
+  try {
+    const parsed = JSON.parse(stripBom(secret).trim()) as unknown
+    return Array.isArray(parsed) ? parsed : undefined
+  }
+  catch {
+    return undefined
+  }
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
 interface AccountRunResult {
   updatedAccount: TaygedoAccount
   shouldUpdateSecret: boolean
   summary: AccountRunSummary
+}
+
+interface AccountResult extends AccountRunResult {
+  /** 本次运行成功时待落盘的「今天已签到」标记。 */
+  attendanceMarker?: AttendanceMarker
 }
 
 async function runAccount(
@@ -563,8 +733,10 @@ async function runCloudDuration(
   if (!api.cloudGetUserInfo) {
     return undefined
   }
-  const cloudGetUserInfo = api.cloudGetUserInfo
-  const loginWithPassword = api.loginWithPassword
+  // 必须绑回 api：这两个方法内部读 `this.fetchImpl`，把方法摘下来单独存成变量
+  // 再调用会让 `this` 变成 undefined，真实 TaygedoApi 实例上直接 TypeError。
+  const cloudGetUserInfo = api.cloudGetUserInfo.bind(api)
+  const loginWithPassword = api.loginWithPassword?.bind(api)
   let updatedAccount: TaygedoAccount | undefined
 
   const respond = (summary: CloudDurationSummary) => ({

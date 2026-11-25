@@ -37,6 +37,8 @@ export class AttendanceService {
       cloudDuration: this.options.cloudDuration,
       sharePlatform: this.options.sharePlatform,
       secretWriter: payload => this.options.accountStore.writeAccounts(payload),
+      // 写回前再读一次，避免并发运行互相覆盖刚刷新出来的 token。
+      accountsReader: () => this.options.accountStore.readAccounts(),
     })
     return result
   }

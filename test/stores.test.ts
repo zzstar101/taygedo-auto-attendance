@@ -28,6 +28,29 @@ describe('AccountStore implementations', () => {
     }
   })
 
+  it('replaces the account file atomically instead of rewriting it in place', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'taygedo-store-atomic-'))
+    const path = join(dir, 'accounts.json')
+    const store = new FileAccountStore(path)
+
+    try {
+      await writeFile(path, '[]\n', { mode: 0o666 })
+      await store.writeAccounts('[{"id":"main"}]')
+
+      expect(await readFile(path, 'utf8')).toBe('[{"id":"main"}]\n')
+      // 临时文件不能在目录里残留
+      expect(await readdir(dir)).toEqual(['accounts.json'])
+
+      // 原子替换后拿到的是新文件的权限，不会被旧文件的 0666 带过去
+      if (process.platform !== 'win32') {
+        expect((await stat(path)).mode & 0o777).toBe(0o600)
+      }
+    }
+    finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
   it('writes account files with owner-only permissions', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'taygedo-store-mode-'))
     const path = join(dir, 'nested', 'accounts.json')
@@ -170,19 +193,80 @@ describe('StateStore implementations', () => {
       // 真实业务 key 形如 attendance:<accountId>:<YYYY-MM-DD>，冒号在 Windows 文件名里非法
       await store.set('attendance:main:2026-11-25', { status: 'success' })
       await store.set('attendance:alt:2026-11-25', { status: 'alt' })
-      await store.set('con', { reserved: true })
       await store.set('trailing.', { trailing: true })
 
       await expect(store.get('attendance:main:2026-11-25')).resolves.toEqual({ status: 'success' })
       await expect(store.get('attendance:alt:2026-11-25')).resolves.toEqual({ status: 'alt' })
-      await expect(store.get('con')).resolves.toEqual({ reserved: true })
       await expect(store.get('trailing.')).resolves.toEqual({ trailing: true })
 
-      const files = await readdir(join(dir, 'prod'))
-      expect(files).toContain('attendance%3Amain%3A2026-11-25.json')
-      expect(files).toContain('attendance%3Aalt%3A2026-11-25.json')
-      expect(files).toContain('_con.json')
-      expect(files).toContain('trailing%2E.json')
+      const files = await readdir(join(dir, 'prod', 'v2'))
+      expect(files).toContain('k-attendance%3amain%3a2026-11-25.json')
+      expect(files).toContain('k-attendance%3aalt%3a2026-11-25.json')
+      expect(files).toContain('k-trailing%2e.json')
+    }
+    finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps distinct keys in distinct files on case-insensitive filesystems', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'taygedo-state-case-'))
+    const store = new FileStateStore(dir, 'prod')
+
+    try {
+      // 大写字母也转义，Windows / macOS 默认卷不会把 Main 和 main 当成同一个文件
+      await store.set('attendance:Main:2026-11-25', { account: 'Main' })
+      await store.set('attendance:main:2026-11-25', { account: 'main' })
+
+      await expect(store.get('attendance:Main:2026-11-25')).resolves.toEqual({ account: 'Main' })
+      await expect(store.get('attendance:main:2026-11-25')).resolves.toEqual({ account: 'main' })
+
+      // key 里带 `%` 也不例外：它自己会被转义成 %25，不会和别的 key 的编码撞上
+      await store.set('a:b', { key: 'a:b' })
+      await store.set('a%3ab', { key: 'a%3ab' })
+      await expect(store.get('a:b')).resolves.toEqual({ key: 'a:b' })
+      await expect(store.get('a%3ab')).resolves.toEqual({ key: 'a%3ab' })
+    }
+    finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('does not let Windows reserved device names share a file', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'taygedo-state-reserved-'))
+    const store = new FileStateStore(dir, 'prod')
+
+    try {
+      // `con` 不能简单加成 `_con`：那样会和真的叫 `_con` 的账号撞名。
+      // 带扩展名的 `con.txt` 同样是 Windows 保留名。
+      await store.set('con', { key: 'con' })
+      await store.set('_con', { key: '_con' })
+      await store.set('con.txt', { key: 'con.txt' })
+      await store.set('NUL', { key: 'NUL' })
+
+      await expect(store.get('con')).resolves.toEqual({ key: 'con' })
+      await expect(store.get('_con')).resolves.toEqual({ key: '_con' })
+      await expect(store.get('con.txt')).resolves.toEqual({ key: 'con.txt' })
+      await expect(store.get('NUL')).resolves.toEqual({ key: 'NUL' })
+
+      expect(await readdir(join(dir, 'prod', 'v2'))).toHaveLength(4)
+    }
+    finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('falls back to a fixed-length file name for very long keys', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'taygedo-state-long-'))
+    const store = new FileStateStore(dir, 'prod')
+    // 225 个字符的账号 id + 两个冒号，转义后会超过单段 255 字节上限
+    const longKey = `attendance:${'a'.repeat(225)}:2026-11-25`
+
+    try {
+      await store.set(longKey, { status: 'success' })
+      await expect(store.get(longKey)).resolves.toEqual({ status: 'success' })
+      const [fileName] = await readdir(join(dir, 'prod', 'v2'))
+      expect(fileName).toMatch(/^k-~[0-9a-f]{64}\.json$/)
     }
     finally {
       await rm(dir, { recursive: true, force: true })
@@ -190,7 +274,7 @@ describe('StateStore implementations', () => {
   })
 
   // 旧版本直接把 key 当文件名（`attendance:main:...`），只有类 Unix 平台存在这种存量文件。
-  it.skipIf(process.platform === 'win32')('reads state written by older versions and migrates it on write', async () => {
+  it.skipIf(process.platform === 'win32')('reads state written by older versions and keeps the legacy file for older runners', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'taygedo-state-legacy-'))
     const legacyPath = join(dir, 'prod', 'attendance:main:2026-11-25.json')
     const store = new FileStateStore(dir, 'prod')
@@ -201,8 +285,79 @@ describe('StateStore implementations', () => {
 
       await expect(store.get('attendance:main:2026-11-25')).resolves.toEqual({ status: 'success' })
 
+      await store.set('attendance:main:2026-11-25', { status: 'success', updated: true })
+      await expect(store.get('attendance:main:2026-11-25')).resolves.toEqual({ status: 'success', updated: true })
+
+      // 旧文件留着并同步成最新值：还没升级的进程只认旧文件名，删掉它就会当天重复签到。
+      expect(JSON.parse(await readFile(legacyPath, 'utf8'))).toEqual({ status: 'success', updated: true })
+      expect(await readdir(join(dir, 'prod', 'v2'))).toEqual(['k-attendance%3amain%3a2026-11-25.json'])
+    }
+    finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it.skipIf(process.platform === 'win32')('never touches another key\'s file in the legacy directory', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'taygedo-state-isolation-'))
+    const store = new FileStateStore(dir, 'prod')
+
+    try {
+      // 旧文件名 `a:b.json` 正好等于 key `a%3Ab` 的「转义名」。分目录之后两者互不影响。
+      await store.set('a:b', 1)
+      await expect(store.get('a%3Ab')).resolves.toBeUndefined()
+
+      await store.set('a%3Ab', 2)
+      await expect(store.get('a:b')).resolves.toBe(1)
+      await expect(store.get('a%3Ab')).resolves.toBe(2)
+    }
+    finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it.skipIf(process.platform === 'win32')('reads legacy files for keys that only became escaped now', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'taygedo-state-legacy-percent-'))
+    const legacyPath = join(dir, 'prod', 'foo%bar.json')
+    const store = new FileStateStore(dir, 'prod')
+
+    try {
+      await mkdir(join(dir, 'prod'), { recursive: true })
+      await writeFile(legacyPath, JSON.stringify({ ok: 1 }), 'utf8')
+
+      // `%` 现在会被转义，但旧版本就能写出这个名字，状态不能读着读着就没了
+      await expect(store.get('foo%bar')).resolves.toEqual({ ok: 1 })
+    }
+    finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it.skipIf(process.platform === 'win32')('falls back to the legacy file when the new file is corrupt', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'taygedo-state-corrupt-'))
+    const store = new FileStateStore(dir, 'prod')
+
+    try {
+      await mkdir(join(dir, 'prod'), { recursive: true })
+      await writeFile(join(dir, 'prod', 'attendance:main:2026-11-25.json'), JSON.stringify({ status: 'success' }), 'utf8')
+      await mkdir(join(dir, 'prod', 'v2'), { recursive: true })
+      // 迁移写到一半被打断留下的半个文件
+      await writeFile(join(dir, 'prod', 'v2', 'k-attendance%3amain%3a2026-11-25.json'), '{"status":', 'utf8')
+
+      await expect(store.get('attendance:main:2026-11-25')).resolves.toEqual({ status: 'success' })
+    }
+    finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('leaves no temporary files behind when writing', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'taygedo-state-tmp-'))
+    const store = new FileStateStore(dir, 'prod')
+
+    try {
       await store.set('attendance:main:2026-11-25', { status: 'success' })
-      expect(await readdir(join(dir, 'prod'))).toEqual(['attendance%3Amain%3A2026-11-25.json'])
+      const files = await readdir(join(dir, 'prod', 'v2'))
+      expect(files.filter(name => name.endsWith('.tmp'))).toEqual([])
     }
     finally {
       await rm(dir, { recursive: true, force: true })

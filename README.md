@@ -532,7 +532,7 @@ pnpm local device --accounts-file data/accounts.json --account-id main --force
 本地 CLI 在 Windows 上可以直接用 `pnpm local ...`（PowerShell / CMD / Git Bash 均可），不需要 WSL：
 
 - 账号文件用记事本、VS Code 或 PowerShell（`>`、`Out-File` 默认 UTF-16LE）保存都能正常读取，UTF-8 BOM 和 UTF-16 会自动识别；如果仍有解析报错，把文件另存为不带 BOM 的 UTF-8。
-- 文件状态存储会把 key 里的冒号等 Windows 非法文件名字符转义成 `%3A` 这类形式（例如 `attendance:main:2026-11-25.json` 实际落盘为 `attendance%3Amain%3A2026-11-25.json`），避免写状态时报 `ENOENT`。
+- 文件状态存储把整个 key 按字节转义成单个文件名，放在 `<state-dir>/<prefix>/v2/` 下（例如 `attendance:main:2026-11-25` 落盘为 `v2/k-attendance%3amain%3a2026-11-25.json`），避免冒号在 Windows 上写状态报 `ENOENT`。
 - `pnpm cloud:function:pack` 在没有 `zip` 的 Windows 上会回退到系统自带的 `bsdtar`（`%SystemRoot%\System32\tar.exe`）。
 - `scripts/qinglong.sh` 是给 Linux 青龙面板用的 bash 脚本，Windows 上想用需要 Git Bash 或 WSL。
 
@@ -636,8 +636,10 @@ account_name=主账号
 每日签到默认会尝试调用云异环 `getUserInfo` 接口，触发每日首次登录赠送时长，并在通知摘要里显示本次赠送分钟和剩余分钟。此功能优先复用账号 JSON 中的 `laohuToken` / `laohuUserId`；缺少 token 但有手机号和可用密码时，会先密码登录拿老虎 token 并写回账号配置。
 
 老虎 token 会过期，过期后接口返回 `code=10004`（`登陆失效，需要重新登陆`），而 `refreshToken` 只能续期塔吉多 token、续不了老虎 token。因此摘要里出现该错误时，程序会用手机号和密码自动重新登录换新老虎 token 并重试一次，成功后把新 token 写回账号配置：
-- 账号配置里有手机号和密码（`TAYGEDO_ACCOUNT_PASSWORDS` / `encryptedPassword`）时，下一次运行会自动恢复，无需手工处理。
+- 账号配置里有手机号和密码（`TAYGEDO_PASSWORDS` / `encryptedPassword`）时，下一次运行会自动恢复，无需手工处理。
 - 没有可用密码时，该账号的云异环任务会失败并提示更新 `laohuToken` / `laohuUserId`，或重新跑一次登录流程补上手机号和密码；APP 签到、游戏签到和金币任务不受影响。
+
+写回账号配置时会重新读一次最新文件，只覆盖本次运行真正改动的字段：两个实例并发运行时不会互相覆盖刚刷新出来的 token，账号 JSON 里本程序不认识的字段（例如自定义备注）也会原样保留。「今天已签到」的标记要等账号配置写回成功后才会落盘，所以写回失败不会让下一次运行直接跳过该账号。
 
 | 配置 | 说明 |
 | --- | --- |
@@ -694,7 +696,12 @@ Cloudflare Workers 默认使用 KV；Docker 和本地 CLI 默认使用文件存�
 
 `TAYGEDO_ACCOUNT_STORE=unstorage` 或 `TAYGEDO_STATE_STORE=unstorage` 时，程序按优先级自动选择：Redis、S3、Upstash、本地 `.data/kv`。
 
-文件状态存储会把状态 key 里 Windows 不允许的字符转义后再当文件名（例如 `attendance:main:2026-11-25` 落盘为 `attendance%3Amain%3A2026-11-25.json`）。旧版本写在未转义文件名下的状态仍会被读取，并在下次写入时自动迁移到新文件名，无需手动处理已有 `data/state` 目录。
+文件状态存储会把状态 key 转义成一个安全的文件名，放在状态目录的 `v2/` 子目录下：
+
+- 转义结果只含小写字母、数字、`_`、`-` 和 `%xx`（`attendance:main:2026-11-25` → `k-attendance%3amain%3a2026-11-25.json`）。大写字母也会被转义，因此在 Windows / macOS 这类大小写不敏感的文件系统上，`Main` 和 `main` 不会共用同一个状态文件。
+- 名字过长（转义后超过 150 字符）时退化成定长哈希名 `k-~<sha256>.json`，避免 `ENAMETOOLONG`。
+- 旧版本写在未转义文件名下的状态仍会被读取（`foo%bar` 这种老文件名也一样），并会在下次写入时同步到新文件名。旧文件不会被删除——混合版本运行期间，还没升级的进程只认旧文件名，删掉会让它当天重复签到。确认所有运行实例都升级后，可以手动清理 `data/state/<prefix>/` 下的旧 `.json`。
+- 写入先落到同目录临时文件再 `rename`，读到半个文件时回退读旧文件，不会因为一次中断就卡住当天签到。
 
 ### 失败排查
 
